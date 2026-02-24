@@ -378,14 +378,14 @@ curl http://localhost:8042/api/stats
 
 - [Orthanc](https://orthanc-server.com/) — лёгкий DICOM сервер
 - [Bootstrap](https://getbootstrap.com/) — CSS фреймворк
-- [Contributors](https://github.com/YOUR_USERNAME/dicom-router/graphs/contributors)
+- [Contributors](https://github.com/crusader3355/dicom-router/graphs/contributors)
 
 ---
 
 ## 📞 Контакты
 
-- **Issues:** [GitHub Issues](https://github.com/YOUR_USERNAME/dicom-router/issues)
-- **Discussions:** [GitHub Discussions](https://github.com/YOUR_USERNAME/dicom-router/discussions)
+- **Issues:** [GitHub Issues](https://github.com/crusader3355/dicom-router/issues)
+- **Discussions:** [GitHub Discussions](https://github.com/crusader3355/dicom-router/discussions)
 
 ---
 
