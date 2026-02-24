@@ -1,6 +1,23 @@
 """
+DICOM Router - HIPAA-compliant DICOM routing system
+Copyright (C) 2024  MidCrusadero
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+================================================================================
 orthanc-dicom-router.py - v3.5.0 Secure & Optimized
-====================================================
+================================================================================
 
 HIPAA-compliant DICOM Router with SQLite persistence
 Changes in v3.5.0:
@@ -42,7 +59,7 @@ import traceback
 # =============================================================================
 
 __version__ = "3.5.0"
-__author__ = "Mohannad Hussain, Claude AI, MidCrusadero"
+__author__ = "MidCrusadero"
 
 
 # =============================================================================
