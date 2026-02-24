@@ -283,18 +283,18 @@ chmod 600 dicom-router.db
 
 ### REST API
 
-| Endpoint | Метод | Описание |
-|----------|-------|----------|
-| `/api/rules` | GET | Получить все правила |
-| `/api/rules` | POST | Создать новое правило |
-| `/api/rules/{id}` | PUT | Обновить правило |
-| `/api/rules/{id}` | DELETE | Удалить правило |
-| `/api/destinations` | GET | Список destination |
-| `/api/destinations/{name}/test` | POST | Проверить соединение |
-| `/api/stats` | GET | Статистика системы |
-| `/api/logs` | GET | Логи (с пагинацией) |
-| `/api/circuit-breaker` | GET | Статус circuit breaker |
-| `/api/circuit-breaker/reset` | POST | Сбросить circuit breaker |
+| Endpoint                        | Метод  | Описание                 |
+|---------------------------------|--------|------------------------- |
+| `/api/rules`                    | GET    | Получить все правила     |
+| `/api/rules`                    | POST   | Создать новое правило    |
+| `/api/rules/{id}`               | PUT    | Обновить правило         |
+| `/api/rules/{id}`               | DELETE | Удалить правило          |
+| `/api/destinations`             | GET    | Список destination       |
+| `/api/destinations/{name}/test` | POST   | Проверить соединение     |
+| `/api/stats`                    | GET    | Статистика системы       |
+| `/api/logs`                     | GET    | Логи (с пагинацией)      |
+| `/api/circuit-breaker`          | GET    | Статус circuit breaker   |
+| `/api/circuit-breaker/reset`    | POST   | Сбросить circuit breaker |
 
 ### Примеры запросов
 
@@ -385,7 +385,6 @@ curl http://localhost:8042/api/stats
 ## 📞 Контакты
 
 - **Issues:** [GitHub Issues](https://github.com/crusader3355/DicomRouterForOrthanc/issues)
-- **Discussions:** [GitHub Discussions](https://github.com/crusader3355/DicomRouterForOrthanc/discussions)
 
 ---
 
