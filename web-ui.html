@@ -1,0 +1,1547 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DICOM Router - Orthanc</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css" rel="stylesheet">
+    <style>
+        :root {
+            --oe-sidebar-bg: #1e2125;
+            --oe-sidebar-text: #adb5bd;
+            --oe-sidebar-active: #0d6efd;
+            --oe-sidebar-hover: #2a2f35;
+            --oe-content-bg: #f5f6f7;
+            --oe-card-bg: #ffffff;
+            --oe-text-primary: #212529;
+            --oe-text-secondary: #6c757d;
+            --oe-border: #dee2e6;
+            --oe-header-bg: #ffffff;
+            --oe-table-header: #f8f9fa;
+            --oe-primary: #0d6efd;
+            --oe-success: #198754;
+            --oe-warning: #ffc107;
+            --oe-danger: #dc3545;
+            --oe-sidebar-width: 260px;
+        }
+        
+        * { box-sizing: border-box; }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background-color: var(--oe-content-bg);
+            color: var(--oe-text-primary);
+            margin: 0;
+            padding: 0;
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+        
+        .sidebar {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: var(--oe-sidebar-width);
+            height: 100vh;
+            background: var(--oe-sidebar-bg);
+            color: var(--oe-sidebar-text);
+            display: flex;
+            flex-direction: column;
+            z-index: 1000;
+            overflow-y: auto;
+        }
+        
+        .sidebar-header {
+            padding: 1.25rem;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+        }
+        
+        .sidebar-brand {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            color: #fff;
+            font-size: 1.25rem;
+            font-weight: 600;
+            text-decoration: none;
+        }
+        
+        .sidebar-brand:hover { color: #fff; }
+        
+        .sidebar-brand i {
+            font-size: 1.5rem;
+            color: var(--oe-sidebar-active);
+        }
+        
+        .sidebar-subtitle {
+            font-size: 0.75rem;
+            color: var(--oe-sidebar-text);
+            margin-top: 0.25rem;
+            opacity: 0.8;
+        }
+        
+        .sidebar-nav {
+            flex: 1;
+            padding: 1rem 0;
+        }
+        
+        .nav-item { margin: 0.25rem 0.75rem; }
+        
+        .nav-link {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            padding: 0.625rem 1rem;
+            color: var(--oe-sidebar-text);
+            text-decoration: none;
+            border-radius: 6px;
+            font-size: 0.9rem;
+            transition: all 0.2s;
+            cursor: pointer;
+            border: none;
+            background: transparent;
+            width: 100%;
+            text-align: left;
+        }
+        
+        .nav-link:hover {
+            background: var(--oe-sidebar-hover);
+            color: #fff;
+        }
+        
+        .nav-link.active {
+            background: var(--oe-sidebar-active);
+            color: #fff;
+        }
+        
+        .nav-link i {
+            font-size: 1.1rem;
+            width: 20px;
+            text-align: center;
+        }
+        
+        .sidebar-footer {
+            padding: 1rem 1.25rem;
+            border-top: 1px solid rgba(255,255,255,0.1);
+            font-size: 0.75rem;
+            color: var(--oe-sidebar-text);
+        }
+        
+        .main-content {
+            margin-left: var(--oe-sidebar-width);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .top-bar {
+            background: var(--oe-header-bg);
+            border-bottom: 1px solid var(--oe-border);
+            padding: 0.75rem 1.5rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+        
+        .top-bar-title {
+            font-size: 1.25rem;
+            font-weight: 500;
+            margin: 0;
+            color: var(--oe-text-primary);
+        }
+        
+        .status-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.4rem;
+            padding: 0.35rem 0.75rem;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            font-weight: 500;
+        }
+        
+        .status-badge.active {
+            background: rgba(25, 135, 84, 0.1);
+            color: var(--oe-success);
+        }
+        
+        .status-badge.inactive {
+            background: rgba(220, 53, 69, 0.1);
+            color: var(--oe-danger);
+        }
+        
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: currentColor;
+        }
+        
+        .content-area {
+            flex: 1;
+            padding: 1.5rem;
+        }
+        
+        .oe2-card {
+            background: var(--oe-card-bg);
+            border: 1px solid var(--oe-border);
+            border-radius: 8px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+            margin-bottom: 1.5rem;
+        }
+        
+        .oe2-card-header {
+            padding: 1rem 1.25rem;
+            border-bottom: 1px solid var(--oe-border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: var(--oe-table-header);
+            border-radius: 8px 8px 0 0;
+        }
+        
+        .oe2-card-title {
+            font-size: 1rem;
+            font-weight: 600;
+            margin: 0;
+            color: var(--oe-text-primary);
+        }
+        
+        .oe2-card-body { padding: 1.25rem; }
+        
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+            margin-bottom: 1.5rem;
+        }
+        
+        .stat-card {
+            background: var(--oe-card-bg);
+            border: 1px solid var(--oe-border);
+            border-radius: 8px;
+            padding: 1.25rem;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+        }
+        
+        .stat-value {
+            font-size: 2rem;
+            font-weight: 700;
+            color: var(--oe-primary);
+            line-height: 1;
+        }
+        
+        .stat-label {
+            font-size: 0.875rem;
+            color: var(--oe-text-secondary);
+            margin-top: 0.5rem;
+        }
+        
+        .btn-oe2 {
+            padding: 0.375rem 0.875rem;
+            font-size: 0.875rem;
+            border-radius: 4px;
+            border: 1px solid transparent;
+            display: inline-flex;
+            align-items: center;
+            gap: 0.4rem;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+        
+        .btn-oe2-primary {
+            background: var(--oe-primary);
+            color: #fff;
+            border-color: var(--oe-primary);
+        }
+        
+        .btn-oe2-primary:hover { background: #0b5ed7; }
+        
+        .btn-oe2-success {
+            background: var(--oe-success);
+            color: #fff;
+        }
+        
+        .btn-oe2-danger {
+            background: var(--oe-danger);
+            color: #fff;
+        }
+        
+        .btn-oe2-outline {
+            background: #fff;
+            color: var(--oe-text-secondary);
+            border-color: var(--oe-border);
+        }
+        
+        .btn-oe2-outline:hover {
+            background: var(--oe-content-bg);
+            color: var(--oe-text-primary);
+        }
+        
+        .form-label-oe2 {
+            font-size: 0.875rem;
+            font-weight: 500;
+            color: var(--oe-text-secondary);
+            margin-bottom: 0.375rem;
+            display: block;
+        }
+        
+        .form-control-oe2 {
+            width: 100%;
+            padding: 0.5rem 0.75rem;
+            border: 1px solid var(--oe-border);
+            border-radius: 4px;
+            font-size: 0.875rem;
+            background: #fff;
+            color: var(--oe-text-primary);
+        }
+        
+        .form-control-oe2:focus {
+            outline: none;
+            border-color: var(--oe-primary);
+            box-shadow: 0 0 0 3px rgba(13,110,253,0.1);
+        }
+        
+        .table-oe2 {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.875rem;
+            margin: 0;
+        }
+        
+        .table-oe2 th {
+            background: var(--oe-table-header);
+            padding: 0.75rem 1rem;
+            text-align: left;
+            font-weight: 600;
+            color: var(--oe-text-secondary);
+            border-bottom: 2px solid var(--oe-border);
+        }
+        
+        .table-oe2 td {
+            padding: 0.75rem 1rem;
+            border-bottom: 1px solid var(--oe-border);
+            color: var(--oe-text-primary);
+            vertical-align: middle;
+        }
+        
+        .table-oe2 tr:hover td {
+            background: rgba(13,110,253,0.02);
+        }
+        
+        .log-container {
+            background: var(--oe-table-header);
+            border: 1px solid var(--oe-border);
+            border-radius: 0 0 8px 8px;
+            max-height: 350px;
+            overflow-y: auto;
+            font-family: "SF Mono", Monaco, "Cascadia Code", monospace;
+            font-size: 0.8rem;
+            padding: 1rem;
+        }
+        
+        .log-entry {
+            padding: 0.25rem 0;
+            border-bottom: 1px solid rgba(0,0,0,0.05);
+            display: flex;
+            gap: 1rem;
+            line-height: 1.5;
+        }
+        
+        .log-time {
+            color: var(--oe-text-secondary);
+            flex-shrink: 0;
+            min-width: 80px;
+        }
+        
+        .log-level {
+            flex-shrink: 0;
+            min-width: 60px;
+            font-weight: 600;
+        }
+        
+        .log-level.INFO { color: var(--oe-primary); }
+        .log-level.WARNING { color: var(--oe-warning); }
+        .log-level.ERROR { color: var(--oe-danger); }
+        .log-level.DEBUG { color: var(--oe-text-secondary); }
+        
+        .log-message { 
+            color: var(--oe-text-primary); 
+            word-break: break-all;
+            flex: 1;
+        }
+        
+        .rule-item {
+            background: var(--oe-table-header);
+            border: 1px solid var(--oe-border);
+            border-radius: 6px;
+            padding: 1rem;
+            margin-bottom: 0.5rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .rule-item:hover { border-color: var(--oe-primary); }
+        
+        .rule-info { flex: 1; }
+        
+        .rule-description {
+            font-size: 0.9rem;
+            font-weight: 500;
+            color: var(--oe-text-primary);
+            margin-bottom: 0.25rem;
+        }
+        
+        .rule-meta {
+            font-size: 0.8rem;
+            color: var(--oe-text-secondary);
+        }
+        
+        .tag {
+            display: inline-flex;
+            align-items: center;
+            padding: 0.25rem 0.625rem;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 500;
+            margin: 0.125rem;
+            cursor: pointer;
+            transition: all 0.15s;
+            background: var(--oe-table-header);
+            border: 1px solid var(--oe-border);
+            color: var(--oe-text-secondary);
+        }
+        
+        .tag:hover {
+            border-color: var(--oe-primary);
+            color: var(--oe-text-primary);
+        }
+        
+        .tag.selected {
+            background: var(--oe-primary);
+            border-color: var(--oe-primary);
+            color: #fff;
+        }
+        
+        .task-item {
+            background: rgba(255, 193, 7, 0.05);
+            border: 1px solid rgba(255, 193, 7, 0.3);
+            border-radius: 6px;
+            padding: 1rem;
+            margin-bottom: 0.5rem;
+        }
+        
+        .task-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 0.5rem;
+        }
+        
+        .task-study {
+            font-weight: 600;
+            color: #856404;
+        }
+        
+        .task-retry {
+            font-size: 0.75rem;
+            background: rgba(255, 193, 7, 0.2);
+            padding: 0.15rem 0.5rem;
+            border-radius: 10px;
+            color: #856404;
+        }
+        
+        .task-detail {
+            font-size: 0.85rem;
+            color: var(--oe-text-secondary);
+            margin-bottom: 0.25rem;
+        }
+        
+        .task-error {
+            font-size: 0.8rem;
+            color: var(--oe-danger);
+            margin-top: 0.5rem;
+            padding-top: 0.5rem;
+            border-top: 1px solid rgba(255, 193, 7, 0.2);
+        }
+        
+        .alert-oe2 {
+            padding: 0.75rem 1rem;
+            border-radius: 4px;
+            margin-bottom: 1rem;
+            font-size: 0.875rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        
+        .alert-oe2-success {
+            background: rgba(25, 135, 84, 0.1);
+            border: 1px solid rgba(25, 135, 84, 0.2);
+            color: var(--oe-success);
+        }
+        
+        .alert-oe2-error {
+            background: rgba(220, 53, 69, 0.1);
+            border: 1px solid rgba(220, 53, 69, 0.2);
+            color: var(--oe-danger);
+        }
+        
+        .alert-oe2-warning {
+            background: rgba(255, 193, 7, 0.1);
+            border: 1px solid rgba(255, 193, 7, 0.2);
+            color: #856404;
+        }
+        
+        .panel { display: none; }
+        .panel.active { display: block; }
+        
+        .grid-2 {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 1rem;
+        }
+        
+        .grid-3 {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 1rem;
+        }
+        
+        @media (max-width: 992px) {
+            .grid-2 { grid-template-columns: 1fr; }
+            .grid-3 { grid-template-columns: 1fr; }
+        }
+        
+        .empty-state {
+            text-align: center;
+            padding: 2rem;
+            color: var(--oe-text-secondary);
+        }
+        
+        .empty-state i {
+            font-size: 2.5rem;
+            margin-bottom: 0.75rem;
+            opacity: 0.3;
+        }
+        
+        .form-switch-oe2 {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            cursor: pointer;
+        }
+        
+        .form-switch-oe2 input[type="checkbox"] {
+            width: 40px;
+            height: 20px;
+            appearance: none;
+            background: var(--oe-border);
+            border-radius: 20px;
+            position: relative;
+            cursor: pointer;
+            transition: background 0.3s;
+        }
+        
+        .form-switch-oe2 input[type="checkbox"]::after {
+            content: '';
+            position: absolute;
+            width: 16px;
+            height: 16px;
+            background: white;
+            border-radius: 50%;
+            top: 2px;
+            left: 2px;
+            transition: transform 0.3s;
+        }
+        
+        .form-switch-oe2 input[type="checkbox"]:checked {
+            background: var(--oe-success);
+        }
+        
+        .form-switch-oe2 input[type="checkbox"]:checked::after {
+            transform: translateX(20px);
+        }
+        
+        .validation-error {
+            color: var(--oe-danger);
+            font-size: 0.8rem;
+            margin-top: 0.25rem;
+            display: flex;
+            align-items: center;
+            gap: 0.25rem;
+        }
+        
+        .info-hint {
+            color: var(--oe-text-secondary);
+            font-size: 0.75rem;
+            margin-top: 0.25rem;
+        }
+    </style>
+</head>
+<body>
+    <nav class="sidebar">
+        <div class="sidebar-header">
+            <a href="#" class="sidebar-brand">
+                <i class="bi bi-box-seam"></i>
+                <div>
+                    <div>ORTHANC</div>
+                    <div class="sidebar-subtitle">DICOM Router v3.5.0</div>
+                </div>
+            </a>
+        </div>
+        
+        <div class="sidebar-nav">
+            <div class="nav-item">
+                <button class="nav-link active" data-tab="dashboard">
+                    <i class="bi bi-speedometer2"></i>
+                    <span>Dashboard</span>
+                </button>
+            </div>
+            <div class="nav-item">
+                <button class="nav-link" data-tab="rules">
+                    <i class="bi bi-signpost-split"></i>
+                    <span>Routing Rules</span>
+                </button>
+            </div>
+            <div class="nav-item">
+                <button class="nav-link" data-tab="queue">
+                    <i class="bi bi-hourglass-split"></i>
+                    <span>Deferred Queue</span>
+                </button>
+            </div>
+            <div class="nav-item">
+                <button class="nav-link" data-tab="watchfolder">
+                    <i class="bi bi-folder-plus"></i>
+                    <span>Watch Folder</span>
+                </button>
+            </div>
+            <div class="nav-item">
+                <button class="nav-link" data-tab="logs">
+                    <i class="bi bi-terminal"></i>
+                    <span>System Logs</span>
+                </button>
+            </div>
+            <div class="nav-item">
+                <button class="nav-link" data-tab="config">
+                    <i class="bi bi-gear"></i>
+                    <span>Configuration</span>
+                </button>
+            </div>
+            <div style="height: 1px; background: rgba(255,255,255,0.1); margin: 1rem 0;"></div>
+            <div class="nav-item">
+                <a href="/admin/dashboard" class="nav-link">
+                    <i class="bi bi-person-workspace"></i>
+                    <span>User Dashboard</span>
+                </a>
+            </div>
+            <div class="nav-item">
+                <a href="/ui/app/explorer.html" class="nav-link">
+                    <i class="bi bi-box-arrow-up-right"></i>
+                    <span>Open OE2</span>
+                </a>
+            </div>
+        </div>
+        
+        <div class="sidebar-footer">
+            <div>Orthanc Router v3.5.0</div>
+        </div>
+    </nav>
+    
+    <main class="main-content">
+        <div class="top-bar">
+            <h2 class="top-bar-title" id="pageTitle">
+                <i class="bi bi-speedometer2"></i> Dashboard
+            </h2>
+            <div style="display: flex; align-items: center; gap: 1rem;">
+                <div class="status-badge" id="statusBadge">
+                    <span class="status-dot"></span>
+                    <span id="statusText">Loading...</span>
+                </div>
+                <div class="btn-group" style="display: flex; gap: 0.5rem;">
+                    <button class="btn-oe2 btn-oe2-success" onclick="control('start')" title="Start">
+                        <i class="bi bi-play-fill"></i>
+                    </button>
+                    <button class="btn-oe2 btn-oe2-danger" onclick="control('stop')" title="Stop">
+                        <i class="bi bi-stop-fill"></i>
+                    </button>
+                    <button class="btn-oe2 btn-oe2-outline" onclick="control('restart')" title="Restart">
+                        <i class="bi bi-arrow-clockwise"></i>
+                    </button>
+                </div>
+            </div>
+        </div>
+        
+        <div class="content-area">
+            <div id="dashboard" class="panel active">
+                <div class="stats-grid" id="statsGrid">
+                    <div class="stat-card">
+                        <div class="stat-value" id="statProcessed">0</div>
+                        <div class="stat-label">Processed</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="statForwarded">0</div>
+                        <div class="stat-label">Forwarded</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="statRules">0</div>
+                        <div class="stat-label">Active Rules</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="statDeferred">0</div>
+                        <div class="stat-label">Deferred</div>
+                    </div>
+                </div>
+                
+                <div class="grid-2">
+                    <div class="oe2-card">
+                        <div class="oe2-card-header">
+                            <h3 class="oe2-card-title"><i class="bi bi-cpu"></i> Processing Queue</h3>
+                        </div>
+                        <div class="oe2-card-body" id="queueStats">
+                            <p style="color: var(--oe-text-secondary);">Loading...</p>
+                        </div>
+                    </div>
+                    
+                    <div class="oe2-card">
+                        <div class="oe2-card-header">
+                            <h3 class="oe2-card-title"><i class="bi bi-folder2-open"></i> Watch Folder</h3>
+                        </div>
+                        <div class="oe2-card-body" id="watchfolderDash">
+                            <p style="color: var(--oe-text-secondary);">Loading...</p>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="oe2-card">
+                    <div class="oe2-card-header">
+                        <h3 class="oe2-card-title"><i class="bi bi-terminal"></i> Recent Activity</h3>
+                        <div style="display: flex; gap: 0.5rem;">
+                            <select id="dashLogLevel" class="form-control-oe2" style="width: auto;" onchange="loadDashboardLogs()">
+                                <option value="ALL">All</option>
+                                <option value="INFO" selected>INFO</option>
+                                <option value="WARNING">WARN</option>
+                                <option value="ERROR">ERROR</option>
+                            </select>
+                            <button class="btn-oe2 btn-oe2-outline" onclick="loadDashboardLogs()">
+                                <i class="bi bi-arrow-clockwise"></i>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="oe2-card-body" style="padding: 0;">
+                        <div class="log-container" id="dashboardLogs" style="max-height: 300px;">
+                            <div class="empty-state"><i class="bi bi-journal"></i><p>Loading logs...</p></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div id="rules" class="panel">
+                <div class="oe2-card">
+                    <div class="oe2-card-header">
+                        <h3 class="oe2-card-title"><i class="bi bi-plus-circle"></i> Add New Rule</h3>
+                    </div>
+                    <div class="oe2-card-body">
+                        <div id="alertBox"></div>
+                        <div class="grid-2">
+                            <div>
+                                <div style="margin-bottom: 1rem;">
+                                    <label class="form-label-oe2">Modality</label>
+                                    <select id="ruleModality" class="form-control-oe2">
+                                        <option value="ALL">ALL (Any Modality)</option>
+                                        <option value="CT">CT - Computed Tomography</option>
+                                        <option value="MR">MR - Magnetic Resonance</option>
+                                        <option value="US">US - Ultrasound</option>
+                                        <option value="CR">CR - Computed Radiography</option>
+                                        <option value="DX">DX - Digital Radiography</option>
+                                        <option value="XA">XA - X-Ray Angiography</option>
+                                        <option value="MG">MG - Mammography</option>
+                                        <option value="PT">PT - PET</option>
+                                        <option value="NM">NM - Nuclear Medicine</option>
+                                    </select>
+                                </div>
+                                
+                                <div style="margin-bottom: 1rem;">
+                                    <label class="form-label-oe2">Condition (Optional)</label>
+                                    <select id="ruleCondition" class="form-control-oe2" onchange="toggleCondition()">
+                                        <option value="">No condition - forward all</option>
+                                        <option value="IfTagEqual">Tag Equals (=)</option>
+                                        <option value="IfTagNotEqual">Tag NOT Equals (≠)</option>
+                                        <option value="IfTagContains">Tag Contains</option>
+                                        <option value="IfTagNotContains">Tag NOT Contains</option>
+                                        <option value="FROM">From Source AET</option>
+                                        <option value="notFROM">NOT From Source AET</option>
+                                    </select>
+                                </div>
+                                
+                                <div id="tagInputs" style="display: none;">
+                                    <div style="margin-bottom: 1rem;">
+                                        <label class="form-label-oe2">DICOM Tag</label>
+                                        <select id="ruleTag" class="form-control-oe2">
+                                            <option value="(0008,1030)">Study Description</option>
+                                            <option value="(0010,0010)">Patient Name</option>
+                                            <option value="(0010,0020)">Patient ID</option>
+                                            <option value="(0020,0010)">Study ID</option>
+                                            <option value="(0008,0080)">Institution Name</option>
+                                            <option value="(0008,1010)">Station Name</option>
+                                            <option value="(0008,0050)">Accession Number</option>
+                                        </select>
+                                    </div>
+                                    <div style="margin-bottom: 1rem;">
+                                        <label class="form-label-oe2">Value</label>
+                                        <input type="text" id="ruleTagValue" class="form-control-oe2" placeholder="Value to match">
+                                    </div>
+                                </div>
+                                
+                                <div id="aetInputs" style="display: none;">
+                                    <div style="margin-bottom: 1rem;">
+                                        <label class="form-label-oe2">Source AET</label>
+                                        <input type="text" id="ruleAET" class="form-control-oe2" placeholder="e.g., CT_SCANNER" style="text-transform: uppercase;">
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <div>
+                                <div style="margin-bottom: 1rem;">
+                                    <label class="form-label-oe2">Destinations</label>
+                                    <div id="destChips" style="min-height: 40px; padding: 0.5rem; background: var(--oe-table-header); border-radius: 4px; border: 1px solid var(--oe-border);">
+                                        <span style="color: var(--oe-text-secondary); font-size: 0.8rem;">Loading modalities...</span>
+                                    </div>
+                                </div>
+                                
+                                <button class="btn-oe2 btn-oe2-primary" onclick="addRule()" style="width: 100%; justify-content: center; padding: 0.6rem;">
+                                    <i class="bi bi-plus-lg"></i> Add Rule
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="oe2-card">
+                    <div class="oe2-card-header">
+                        <h3 class="oe2-card-title"><i class="bi bi-list-check"></i> Current Rules</h3>
+                        <button class="btn-oe2 btn-oe2-outline" onclick="loadRules()">
+                            <i class="bi bi-arrow-clockwise"></i>
+                        </button>
+                    </div>
+                    <div class="oe2-card-body" id="rulesList">
+                        <div class="empty-state">
+                            <i class="bi bi-signpost-split"></i>
+                            <p>No rules configured</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div id="queue" class="panel">
+                <div class="oe2-card">
+                    <div class="oe2-card-header">
+                        <h3 class="oe2-card-title"><i class="bi bi-hourglass-split"></i> Deferred Tasks</h3>
+                        <div style="display: flex; gap: 0.5rem;">
+                            <button class="btn-oe2 btn-oe2-outline" onclick="loadQueue()">
+                                <i class="bi bi-arrow-clockwise"></i> Refresh
+                            </button>
+                            <button class="btn-oe2 btn-oe2-danger" onclick="clearQueue()">
+                                <i class="bi bi-trash"></i> Clear All
+                            </button>
+                        </div>
+                    </div>
+                    <div class="oe2-card-body" id="tasksList">
+                        <div class="empty-state">
+                            <i class="bi bi-check-circle"></i>
+                            <p>No deferred tasks</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div id="watchfolder" class="panel">
+                <div class="grid-2">
+                    <div class="oe2-card">
+                        <div class="oe2-card-header">
+                            <h3 class="oe2-card-title"><i class="bi bi-gear"></i> Watch Folder Settings</h3>
+                            <button class="btn-oe2 btn-oe2-primary" onclick="saveWatchFolderConfig()">
+                                <i class="bi bi-save"></i> Save
+                            </button>
+                        </div>
+                        <div class="oe2-card-body">
+                            <div id="watchfolderAlert"></div>
+                            
+                            <div style="margin-bottom: 1.5rem;">
+                                <label class="form-switch-oe2">
+                                    <input type="checkbox" id="wf_enabled">
+                                    <span>Enable Watch Folder</span>
+                                </label>
+                            </div>
+                            
+                            <div style="margin-bottom: 1rem;">
+                                <label class="form-label-oe2">Watch Folder Path</label>
+                                <input type="text" id="wf_path" class="form-control-oe2" placeholder="C:\\Orthanc\\Incoming">
+                                <div class="info-hint">Full absolute path. Must exist and have read permissions.</div>
+                                <div id="wfPathValidation" class="validation-error" style="display: none;"></div>
+                            </div>
+                            
+                            <div class="grid-3">
+                                <div style="margin-bottom: 1rem;">
+                                    <label class="form-label-oe2">Scan Interval (sec)</label>
+                                    <input type="number" id="wf_interval" class="form-control-oe2" value="5" min="1" max="300">
+                                    <div class="info-hint">How often to scan for new files</div>
+                                </div>
+                                
+                                <div style="margin-bottom: 1rem;">
+                                    <label class="form-label-oe2">Batch Interval (sec)</label>
+                                    <input type="number" id="wf_batch_interval" class="form-control-oe2" value="30" min="1" max="3600">
+                                    <div class="info-hint">Process files every N seconds</div>
+                                </div>
+                                
+                                <div style="margin-bottom: 1rem;">
+                                    <label class="form-label-oe2">Min File Age (sec)</label>
+                                    <input type="number" id="wf_min_age" class="form-control-oe2" value="60" min="0" max="3600">
+                                    <div class="info-hint">File must be stable for N sec</div>
+                                </div>
+                            </div>
+                            
+                            <div style="margin-bottom: 1rem;">
+                                <label class="form-label-oe2">Max Subfolder Depth</label>
+                                <input type="number" id="wf_max_depth" class="form-control-oe2" value="5" min="1" max="20">
+                                <div class="info-hint">Limit recursion depth (performance)</div>
+                            </div>
+                            
+                            <div style="margin-bottom: 1rem;">
+                                <label class="form-label-oe2">File Extensions (comma separated)</label>
+                                <input type="text" id="wf_extensions" class="form-control-oe2" value=".dcm,.bin" placeholder=".dcm,.bin">
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="oe2-card">
+                        <div class="oe2-card-header">
+                            <h3 class="oe2-card-title"><i class="bi bi-sliders"></i> Advanced Options</h3>
+							<button class="btn-oe2 btn-oe2-primary" onclick="saveWatchFolderConfig()">
+        <i class="bi bi-save"></i> Save
+    </button>
+                        </div>
+                        <div class="oe2-card-body">
+                            <div style="margin-bottom: 1.5rem;">
+                                <label class="form-switch-oe2">
+                                    <input type="checkbox" id="wf_delete_originals" checked>
+                                    <span>Delete Originals After Import</span>
+                                </label>
+                                <div class="info-hint">Requires write permission to watch folder</div>
+                            </div>
+                            
+                            <div style="margin-bottom: 1.5rem;">
+                                <label class="form-switch-oe2">
+                                    <input type="checkbox" id="wf_cleanup">
+                                    <span>Enable Periodic Cleanup</span>
+                                </label>
+                            </div>
+                            
+                            <div style="margin-bottom: 1rem;">
+                                <label class="form-label-oe2">Cleanup Interval (seconds)</label>
+                                <input type="number" id="wf_cleanup_interval" class="form-control-oe2" value="600" min="60">
+                            </div>
+                            
+                            <div style="background: var(--oe-table-header); padding: 1rem; border-radius: 6px; margin-top: 1.5rem;">
+                                <div style="display: flex; justify-content: space-between; align-items: center;">
+                                    <span style="font-weight: 500;"><i class="bi bi-info-circle"></i> Status</span>
+                                    <button class="btn-oe2 btn-oe2-outline" onclick="triggerWatchFolderScan()">
+                                        <i class="bi bi-play"></i> Scan Now
+                                    </button>
+                                </div>
+                                <div id="wfStatusText" style="margin-top: 0.5rem; font-size: 0.875rem; color: var(--oe-text-secondary);">
+                                    Loading...
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="oe2-card">
+                    <div class="oe2-card-header">
+                        <h3 class="oe2-card-title"><i class="bi bi-clock-history"></i> Recent Watch Folder Activity</h3>
+                        <button class="btn-oe2 btn-oe2-outline" onclick="loadWatchFolderLogs()">
+                            <i class="bi bi-arrow-clockwise"></i> Refresh
+                        </button>
+                    </div>
+                    <div class="oe2-card-body" style="padding: 0;">
+                        <div class="log-container" id="watchfolderLogs" style="max-height: 300px;"></div>
+                    </div>
+                </div>
+            </div>
+            
+            <div id="logs" class="panel">
+                <div class="oe2-card">
+                    <div class="oe2-card-header">
+                        <h3 class="oe2-card-title"><i class="bi bi-terminal"></i> System Logs</h3>
+                        <div style="display: flex; gap: 0.5rem; align-items: center;">
+                            <select id="logLevelFilter" class="form-control-oe2" onchange="loadLogs()" style="width: auto;">
+                                <option value="ALL">All Levels</option>
+                                <option value="DEBUG">DEBUG</option>
+                                <option value="INFO" selected>INFO</option>
+                                <option value="WARNING">WARNING</option>
+                                <option value="ERROR">ERROR</option>
+                            </select>
+                            <button class="btn-oe2 btn-oe2-outline" onclick="loadLogs()">
+                                <i class="bi bi-arrow-clockwise"></i>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="oe2-card-body" style="padding: 0;">
+                        <div class="log-container" id="fullLogs" style="max-height: 500px;"></div>
+                    </div>
+                </div>
+            </div>
+            
+            <div id="config" class="panel">
+                <div class="oe2-card">
+                    <div class="oe2-card-header">
+                        <h3 class="oe2-card-title"><i class="bi bi-gear"></i> Configuration</h3>
+                    </div>
+                    <div class="oe2-card-body">
+                        <div id="configForm" class="grid-2"></div>
+                        <div style="margin-top: 1rem;">
+                            <button class="btn-oe2 btn-oe2-primary" onclick="saveConfig()">
+                                <i class="bi bi-check-lg"></i> Save Configuration
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <script>
+        let selectedDests = [];
+        let modalities = [];
+        let queueRefreshInterval;
+        let dashboardLogInterval;
+        let watchFolderLogInterval;
+        
+        const pageIcons = {
+            dashboard: 'bi-speedometer2',
+            rules: 'bi-signpost-split',
+            queue: 'bi-hourglass-split',
+            watchfolder: 'bi-folder-plus',
+            logs: 'bi-terminal',
+            config: 'bi-gear'
+        };
+        
+        document.querySelectorAll('.nav-link[data-tab]').forEach(link => {
+            link.onclick = () => {
+                const tab = link.dataset.tab;
+                
+                document.querySelectorAll('.nav-link').forEach(l => l.classList.remove('active'));
+                document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+                
+                link.classList.add('active');
+                document.getElementById(tab).classList.add('active');
+                
+                document.getElementById('pageTitle').innerHTML = 
+                    `<i class="bi ${pageIcons[tab]}"></i> ${tab.charAt(0).toUpperCase() + tab.slice(1)}`;
+                
+                if (tab !== 'queue' && queueRefreshInterval) {
+                    clearInterval(queueRefreshInterval);
+                    queueRefreshInterval = null;
+                }
+                
+                if (tab !== 'dashboard' && dashboardLogInterval) {
+                    clearInterval(dashboardLogInterval);
+                    dashboardLogInterval = null;
+                }
+                
+                if (tab !== 'watchfolder' && watchFolderLogInterval) {
+                    clearInterval(watchFolderLogInterval);
+                    watchFolderLogInterval = null;
+                }
+                
+                if (tab === 'rules') { loadRules(); loadModalities(); }
+                if (tab === 'queue') { 
+                    loadQueue(); 
+                    queueRefreshInterval = setInterval(loadQueue, 5000);
+                }
+                if (tab === 'watchfolder') { 
+                    loadWatchFolderStatus(); 
+                    loadWatchFolderLogs();
+                    watchFolderLogInterval = setInterval(loadWatchFolderLogs, 3000);
+                }
+                if (tab === 'logs') loadLogs();
+                if (tab === 'config') loadConfig();
+                if (tab === 'dashboard') {
+                    loadDashboardLogs();
+                    dashboardLogInterval = setInterval(loadDashboardLogs, 3000);
+                }
+            };
+        });
+        
+        function toggleCondition() {
+            const c = document.getElementById('ruleCondition').value;
+            document.getElementById('tagInputs').style.display = 
+                ['IfTagContains', 'IfTagEqual', 'IfTagNotEqual', 'IfTagNotContains'].includes(c) ? 'block' : 'none';
+            document.getElementById('aetInputs').style.display = 
+                ['FROM', 'notFROM'].includes(c) ? 'block' : 'none';
+        }
+        
+        async function loadStatus() {
+            try {
+                const r = await fetch('/dicom-router/health');
+                const d = await r.json();
+                
+                const badge = document.getElementById('statusBadge');
+                badge.className = 'status-badge ' + (d.router_enabled ? 'active' : 'inactive');
+                document.getElementById('statusText').textContent = d.router_enabled ? 'Active' : 'Stopped';
+                
+                document.getElementById('statProcessed').textContent = d.metrics?.counters?.studies_processed || 0;
+                document.getElementById('statForwarded').textContent = d.metrics?.counters?.studies_forwarded || 0;
+                document.getElementById('statRules').textContent = d.rules?.count || 0;
+                document.getElementById('statDeferred').textContent = d.deferred?.total_tasks || 0;
+                
+                document.getElementById('queueStats').innerHTML = `
+                    <table class="table-oe2">
+                        <tr><td>Queue Size</td><td><strong>${d.processing?.queue_size || 0}</strong> / ${d.processing?.max_size || 100}</td></tr>
+                        <tr><td>Workers</td><td><strong>${d.processing?.workers || 0}</strong></td></tr>
+                    </table>
+                `;
+                
+                const wf = d.watchfolder || {};
+                const statusColor = !wf.folder_valid ? 'var(--oe-danger)' : (wf.running ? 'var(--oe-success)' : 'var(--oe-warning)');
+                const validationMsg = wf.validation_message ? `<br><small style="color: var(--oe-danger)">${escapeHtml(wf.validation_message)}</small>` : '';
+                
+                document.getElementById('watchfolderDash').innerHTML = `
+                    <table class="table-oe2">
+                        <tr>
+                            <td>Status</td>
+                            <td><strong style="color: ${statusColor}">
+                                ${!wf.folder_valid ? '⚠️ Invalid Path' : (wf.running ? '✅ Running' : '⏹️ Stopped')}
+                            </strong>${validationMsg}</td>
+                        </tr>
+                        <tr><td>Folder</td><td>${escapeHtml(wf.folder || 'Not set')}</td></tr>
+                        <tr><td>Files in Queue</td><td><strong>${wf.files_pending || 0}</strong></td></tr>
+                        <tr><td>Processed Total</td><td><strong>${wf.files_processed || 0}</strong></td></tr>
+                        <tr><td>DB Size</td><td><strong>${wf.db_size || 0}</strong> tracked</td></tr>
+                        <tr><td>Last Scan</td><td>${wf.last_scan ? new Date(wf.last_scan).toLocaleTimeString() : 'Never'}</td></tr>
+                    </table>
+                `;
+            } catch (e) { console.error(e); }
+        }
+        
+        async function loadDashboardLogs() {
+            try {
+                const level = document.getElementById('dashLogLevel').value;
+                const r = await fetch(`/dicom-router/logs?limit=50&level=${level}`);
+                const d = await r.json();
+                renderLogs('dashboardLogs', d.logs);
+            } catch (e) {
+                console.debug('Dashboard logs update failed:', e);
+            }
+        }
+        
+        async function loadLogs() {
+            try {
+                const level = document.getElementById('logLevelFilter').value;
+                const r = await fetch(`/dicom-router/logs?limit=200&level=${level}`);
+                const d = await r.json();
+                renderLogs('fullLogs', d.logs);
+            } catch (e) {
+                document.getElementById('fullLogs').innerHTML = 
+                    '<div class="log-entry"><span class="log-message" style="color: var(--oe-danger)">Error: ' + e.message + '</span></div>';
+            }
+        }
+        
+        function renderLogs(containerId, logs) {
+            const container = document.getElementById(containerId);
+            if (!logs || logs.length === 0) {
+                container.innerHTML = '<div class="empty-state"><i class="bi bi-journal"></i><p>No logs available</p></div>';
+                return;
+            }
+            container.innerHTML = logs.slice().reverse().map(l => `
+                <div class="log-entry">
+                    <span class="log-time">${l.timestamp.split(' ')[1] || l.timestamp}</span>
+                    <span class="log-level ${l.level}">${l.level}</span>
+                    <span class="log-message">${escapeHtml(l.message)}</span>
+                </div>
+            `).join('');
+        }
+        
+        async function loadModalities() {
+            try {
+                const r = await fetch('/modalities');
+                modalities = await r.json();
+                renderDestinations();
+            } catch (e) {
+                document.getElementById('destChips').innerHTML = 
+                    '<span style="color: var(--oe-danger); font-size: 0.8rem;">Error loading modalities</span>';
+            }
+        }
+        
+        function renderDestinations() {
+            document.getElementById('destChips').innerHTML = modalities.length 
+                ? modalities.map(m => `
+                    <span class="tag ${selectedDests.includes(m) ? 'selected' : ''}" onclick="toggleDest('${m}')">${m}</span>
+                `).join('')
+                : '<span style="color: var(--oe-text-secondary); font-size: 0.8rem;">No modalities configured</span>';
+        }
+        
+        function toggleDest(m) {
+            const i = selectedDests.indexOf(m);
+            if (i > -1) selectedDests.splice(i, 1);
+            else selectedDests.push(m);
+            renderDestinations();
+        }
+        
+        async function loadRules() {
+            try {
+                const r = await fetch('/dicom-router/rules');
+                const d = await r.json();
+                
+                if (!d.rules || d.rules.length === 0) {
+                    document.getElementById('rulesList').innerHTML = `
+                        <div class="empty-state">
+                            <i class="bi bi-signpost-split"></i>
+                            <p>No rules configured</p>
+                        </div>
+                    `;
+                    return;
+                }
+                
+                document.getElementById('rulesList').innerHTML = d.rules.map((rule, i) => `
+                    <div class="rule-item">
+                        <div class="rule-info">
+                            <div class="rule-description">${escapeHtml(rule.description)}</div>
+                            <div class="rule-meta">
+                                <i class="bi bi-graph-up"></i> ${rule.match_count || 0} matches
+                                &nbsp;•&nbsp;
+                                <i class="bi bi-${rule.enabled ? 'check-circle text-success' : 'x-circle text-danger'}"></i>
+                                ${rule.enabled ? 'Enabled' : 'Disabled'}
+                            </div>
+                        </div>
+                        <button class="btn-oe2 btn-oe2-danger" onclick="deleteRule(${i})" title="Delete rule">
+                            <i class="bi bi-trash"></i>
+                        </button>
+                    </div>
+                `).join('');
+            } catch (e) {
+                document.getElementById('rulesList').innerHTML = 
+                    `<div class="alert-oe2 alert-oe2-error"><i class="bi bi-exclamation-triangle"></i> ${e.message}</div>`;
+            }
+        }
+        
+        async function addRule() {
+            if (!selectedDests.length) {
+                showAlert('error', 'Please select at least one destination');
+                return;
+            }
+            
+            const rule = {
+                modality: document.getElementById('ruleModality').value,
+                destinations: selectedDests,
+                condition_type: document.getElementById('ruleCondition').value || null,
+                dicom_tag: null,
+                tag_value: null,
+                source_aet: null
+            };
+            
+            const cond = rule.condition_type;
+            if (['IfTagContains', 'IfTagEqual', 'IfTagNotEqual', 'IfTagNotContains'].includes(cond)) {
+                rule.dicom_tag = document.getElementById('ruleTag').value;
+                rule.tag_value = document.getElementById('ruleTagValue').value;
+                if (!rule.tag_value) { showAlert('error', 'Please enter tag value'); return; }
+            }
+            if (['FROM', 'notFROM'].includes(cond)) {
+                rule.source_aet = document.getElementById('ruleAET').value.toUpperCase();
+                if (!rule.source_aet) { showAlert('error', 'Please enter source AET'); return; }
+            }
+            
+            try {
+                const current = await (await fetch('/dicom-router/rules')).json();
+                current.rules.push(rule);
+                const res = await fetch('/dicom-router/rules', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(current.rules)
+                });
+                const result = await res.json();
+                if (result.success) {
+                    showAlert('success', 'Rule added successfully');
+                    selectedDests = [];
+                    document.getElementById('ruleTagValue').value = '';
+                    document.getElementById('ruleAET').value = '';
+                    loadRules();
+                    renderDestinations();
+                } else {
+                    showAlert('error', result.error || 'Failed to add rule');
+                }
+            } catch (e) { showAlert('error', e.message); }
+        }
+        
+        async function deleteRule(i) {
+            if (!confirm('Delete this rule?')) return;
+            try {
+                const current = await (await fetch('/dicom-router/rules')).json();
+                current.rules.splice(i, 1);
+                await fetch('/dicom-router/rules', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(current.rules)
+                });
+                loadRules();
+            } catch (e) { showAlert('error', e.message); }
+        }
+        
+        async function loadQueue() {
+            try {
+                const r = await fetch('/dicom-router/deferred');
+                const d = await r.json();
+                
+                if (!d.tasks || d.tasks.length === 0) {
+                    document.getElementById('tasksList').innerHTML = `
+                        <div class="empty-state">
+                            <i class="bi bi-check-circle"></i>
+                            <p>No deferred tasks</p>
+                        </div>
+                    `;
+                    return;
+                }
+                
+                document.getElementById('tasksList').innerHTML = d.tasks.map(t => `
+                    <div class="task-item">
+                        <div class="task-header">
+                            <span class="task-study"><i class="bi bi-file-medical"></i> ${t.study_id ? t.study_id.substring(0, 20) + '...' : 'N/A'}</span>
+                            <span class="task-retry">Retry #${t.retry_count}</span>
+                        </div>
+                        <div class="task-detail"><strong>Patient:</strong> ${escapeHtml(t.patient_name) || 'Unknown'}</div>
+                        <div class="task-detail"><strong>Modality:</strong> ${t.modality || 'N/A'} → <strong>${t.destination}</strong></div>
+                        <div class="task-detail"><strong>Next retry:</strong> ${new Date(t.next_retry_at).toLocaleString()}</div>
+                        ${t.last_error ? `<div class="task-error"><i class="bi bi-exclamation-triangle"></i> ${escapeHtml(t.last_error)}</div>` : ''}
+                    </div>
+                `).join('');
+            } catch (e) {
+                document.getElementById('tasksList').innerHTML = 
+                    `<div class="alert-oe2 alert-oe2-error"><i class="bi bi-exclamation-triangle"></i> ${e.message}</div>`;
+            }
+        }
+        
+        async function clearQueue() {
+            if (!confirm('Clear all deferred tasks?')) return;
+            try {
+                await fetch('/dicom-router/deferred', { method: 'DELETE' });
+                loadQueue();
+                showAlert('success', 'Queue cleared');
+            } catch (e) { showAlert('error', e.message); }
+        }
+        
+        async function loadWatchFolderStatus() {
+            try {
+                const r = await fetch('/dicom-router/watchfolder');
+                const d = await r.json();
+                
+                document.getElementById('wf_enabled').checked = d.enabled;
+                document.getElementById('wf_path').value = d.folder || '';
+                document.getElementById('wf_interval').value = d.interval || 5;
+                document.getElementById('wf_batch_interval').value = d.batch_interval || 30;
+                document.getElementById('wf_min_age').value = d.min_file_age || 60;
+                document.getElementById('wf_max_depth').value = d.max_depth || 5;
+                document.getElementById('wf_extensions').value = d.extensions ? d.extensions.join(',') : '.dcm';
+                document.getElementById('wf_delete_originals').checked = d.delete_originals !== false;
+                document.getElementById('wf_cleanup').checked = d.cleanup_enabled || false;
+                document.getElementById('wf_cleanup_interval').value = d.cleanup_interval || 600;
+                
+                const valDiv = document.getElementById('wfPathValidation');
+                if (!d.folder_valid) {
+                    valDiv.style.display = 'flex';
+                    valDiv.innerHTML = `<i class="bi bi-exclamation-triangle"></i> ${escapeHtml(d.validation_message || 'Path validation failed')}`;
+                } else {
+                    valDiv.style.display = 'none';
+                }
+                
+                const statusText = `
+                    ${d.running ? '✅ Running' : (d.folder_valid ? '⏹️ Stopped' : '❌ Invalid')} | 
+                    📁 ${d.files_processed || 0} processed, ${d.files_pending || 0} pending | 
+                    🕐 Last scan: ${d.last_scan ? new Date(d.last_scan).toLocaleString() : 'Never'}
+                `;
+                document.getElementById('wfStatusText').innerHTML = statusText;
+                
+            } catch (e) {
+                showWatchFolderAlert('error', 'Failed to load Watch Folder status');
+            }
+        }
+        
+        async function saveWatchFolderConfig() {
+            const path = document.getElementById('wf_path').value;
+            
+            const cfg = {
+                WATCH_FOLDER_ENABLED: document.getElementById('wf_enabled').checked,
+				WATCH_FOLDER_PATH: path,
+				WATCH_FOLDER_INTERVAL: parseInt(document.getElementById('wf_interval').value),
+				WATCH_FOLDER_BATCH_INTERVAL: parseInt(document.getElementById('wf_batch_interval').value),
+				WATCH_FOLDER_MIN_FILE_AGE: parseInt(document.getElementById('wf_min_age').value),
+				WATCH_FOLDER_MAX_DEPTH: parseInt(document.getElementById('wf_max_depth').value),
+				WATCH_FOLDER_EXTENSIONS: document.getElementById('wf_extensions').value,
+				WATCH_FOLDER_CLEANUP_ENABLED: document.getElementById('wf_cleanup').checked,
+				WATCH_FOLDER_CLEANUP_INTERVAL: parseInt(document.getElementById('wf_cleanup_interval').value),
+				WATCH_FOLDER_DELETE_ORIGINALS: document.getElementById('wf_delete_originals').checked
+        };
+            
+            try {
+                const r = await fetch('/dicom-router/watchfolder', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(cfg)
+                });
+                const d = await r.json();
+                if (d.success) {
+                    showWatchFolderAlert('success', 'Configuration saved.');
+                    setTimeout(loadWatchFolderStatus, 500);
+                } else {
+                    showWatchFolderAlert('error', d.error || 'Save failed');
+                }
+            } catch (e) { showWatchFolderAlert('error', e.message); }
+        }
+        
+        async function triggerWatchFolderScan() {
+            try {
+                const r = await fetch('/dicom-router/watchfolder/scan', { method: 'POST' });
+                const d = await r.json();
+                if (d.success) {
+                    showWatchFolderAlert('success', 'Manual scan triggered.');
+                    setTimeout(loadWatchFolderStatus, 1000);
+                }
+            } catch (e) { showWatchFolderAlert('error', e.message); }
+        }
+        
+        async function loadWatchFolderLogs() {
+            try {
+                const r = await fetch('/dicom-router/watchfolder/logs');
+                const d = await r.json();
+                const container = document.getElementById('watchfolderLogs');
+                
+                if (!d.logs || d.logs.length === 0) {
+                    container.innerHTML = '<div class="empty-state"><i class="bi bi-journal"></i><p>No recent activity</p></div>';
+                    return;
+                }
+                
+                container.innerHTML = d.logs.slice().reverse().map(l => `
+                    <div class="log-entry">
+                        <span class="log-time">${new Date(l.timestamp).toLocaleTimeString()}</span>
+                        <span class="log-level ${l.type}">${l.type}</span>
+                        <span class="log-message"><strong>${escapeHtml(l.filename)}</strong>${l.details ? ': ' + escapeHtml(l.details) : ''}</span>
+                    </div>
+                `).join('');
+            } catch (e) {
+                console.debug('Watch Folder logs update failed:', e);
+            }
+        }
+        
+        function showWatchFolderAlert(type, msg) {
+            const box = document.getElementById('watchfolderAlert');
+            if (box) {
+                box.innerHTML = `<div class="alert-oe2 alert-oe2-${type}"><i class="bi bi-${type === 'success' ? 'check-circle' : (type === 'warning' ? 'exclamation-triangle' : 'x-circle')}"></i> ${escapeHtml(msg)}</div>`;
+                setTimeout(() => box.innerHTML = '', 5000);
+            }
+        }
+        
+        async function loadConfig() {
+            try {
+                const r = await fetch('/dicom-router/config');
+                const cfg = await r.json();
+                const fields = [
+                    { k: 'CONNECTIVITY_CHECK_ENABLED', l: 'Connectivity Check', t: 'checkbox', icon: 'bi-wifi' },
+                    { k: 'ECHO_TIMEOUT', l: 'Echo Timeout (sec)', t: 'number', icon: 'bi-clock' },
+                    { k: 'ECHO_CACHE_TTL', l: 'Cache TTL (sec)', t: 'number', icon: 'bi-clock-history' },
+                    { k: 'RETRY_INITIAL_DELAY', l: 'Retry Delay (sec)', t: 'number', icon: 'bi-hourglass' },
+                    { k: 'RETRY_MAX_DELAY', l: 'Max Delay (sec)', t: 'number', icon: 'bi-hourglass-top' },
+                    { k: 'RETRY_MAX_ATTEMPTS', l: 'Max Attempts', t: 'number', icon: 'bi-arrow-repeat' },
+                    { k: 'ASYNC_FORWARD', l: 'Async Forward', t: 'checkbox', icon: 'bi-lightning' },
+                    { k: 'COMPRESS', l: 'Compress', t: 'checkbox', icon: 'bi-file-zip' },
+                    { k: 'LOG_LEVEL', l: 'Log Level', t: 'select', icon: 'bi-terminal', 
+                      options: ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'] }
+                ];
+                
+                document.getElementById('configForm').innerHTML = fields.map(f => {
+                    if (f.t === 'select') {
+                        return `<div style="margin-bottom: 1rem;">
+                            <label class="form-label-oe2"><i class="bi ${f.icon}"></i> ${f.l}</label>
+                            <select id="cfg_${f.k}" class="form-control-oe2">
+                                ${f.options.map(o => `<option value="${o}" ${cfg[f.k] === o ? 'selected' : ''}>${o}</option>`).join('')}
+                            </select>
+                        </div>`;
+                    }
+                    if (f.t === 'checkbox') {
+                        return `<div style="margin-bottom: 1rem;">
+                            <label class="form-label-oe2"><i class="bi ${f.icon}"></i> ${f.l}</label>
+                            <div style="padding: 0.5rem 0;"><input type="checkbox" id="cfg_${f.k}" ${cfg[f.k] ? 'checked' : ''} style="width: 18px; height: 18px; cursor: pointer;"></div>
+                        </div>`;
+                    }
+                    return `<div style="margin-bottom: 1rem;">
+                        <label class="form-label-oe2"><i class="bi ${f.icon}"></i> ${f.l}</label>
+                        <input type="number" id="cfg_${f.k}" class="form-control-oe2" value="${cfg[f.k] || 0}">
+                    </div>`;
+                }).join('');
+            } catch (e) {
+                document.getElementById('configForm').innerHTML = `<div class="alert-oe2 alert-oe2-error"><i class="bi bi-exclamation-triangle"></i> ${e.message}</div>`;
+            }
+        }
+        
+        async function saveConfig() {
+            const cfg = {};
+            document.querySelectorAll('#configForm input, #configForm select').forEach(i => {
+                const k = i.id.replace('cfg_', '');
+                if (i.type === 'checkbox') cfg[k] = i.checked;
+                else if (i.tagName === 'SELECT') cfg[k] = i.value;
+                else cfg[k] = parseInt(i.value);
+            });
+            try {
+                const r = await fetch('/dicom-router/config', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(cfg)
+                });
+                const d = await r.json();
+                if (d.success) alert('Configuration saved successfully');
+                else alert(d.error || 'Save failed');
+            } catch (e) { alert(e.message); }
+        }
+        
+        async function control(action) {
+            try {
+                const r = await fetch('/dicom-router/control', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action })
+                });
+                const d = await r.json();
+                showAlert(d.success ? 'success' : 'error', d.message || d.error);
+                setTimeout(loadStatus, 500);
+            } catch (e) { showAlert('error', e.message); }
+        }
+        
+        function showAlert(type, msg) {
+            const box = document.getElementById('alertBox');
+            if (box) {
+                box.innerHTML = `<div class="alert-oe2 alert-oe2-${type}"><i class="bi bi-${type === 'success' ? 'check-circle' : 'exclamation-triangle'}"></i> ${escapeHtml(msg)}</div>`;
+                setTimeout(() => box.innerHTML = '', 5000);
+            }
+        }
+        
+        function escapeHtml(text) {
+            if (!text) return '';
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+        
+        loadStatus();
+        setInterval(loadStatus, 5000);
+        
+        if (document.getElementById('dashboard').classList.contains('active')) {
+            loadDashboardLogs();
+            dashboardLogInterval = setInterval(loadDashboardLogs, 3000);
+        }
+    </script>
+</body>
+</html>

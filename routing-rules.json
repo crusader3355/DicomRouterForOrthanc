@@ -1,0 +1,15 @@
+[
+  {
+    "modality": "MR",
+    "destinations": [
+      "EFILM"
+    ],
+    "description": "Forward ALL MR to EFILM",
+    "condition_type": null,
+    "dicom_tag": null,
+    "tag_value": null,
+    "source_aet": null,
+    "enabled": true,
+    "match_count": 1111
+  }
+]
