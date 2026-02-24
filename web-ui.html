@@ -663,6 +663,10 @@
                     <span class="status-dot"></span>
                     <span id="statusText">Loading...</span>
                 </div>
+                <div id="stableModeBadge" class="status-badge" style="background: var(--oe-sidebar-bg); color: var(--oe-sidebar-text);">
+                    <i class="bi bi-layers"></i>
+                    <span id="stableModeText">Mode: study</span>
+                </div>
                 <div class="btn-group" style="display: flex; gap: 0.5rem;">
                     <button class="btn-oe2 btn-oe2-success" onclick="control('start')" title="Start">
                         <i class="bi bi-play-fill"></i>
@@ -695,6 +699,14 @@
                     <div class="stat-card">
                         <div class="stat-value" id="statDeferred">0</div>
                         <div class="stat-label">Deferred</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="statSeriesProcessed">0</div>
+                        <div class="stat-label">Series Processed</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="statSeriesForwarded">0</div>
+                        <div class="stat-label">Series Forwarded</div>
                     </div>
                 </div>
                 
@@ -1096,8 +1108,22 @@
                 badge.className = 'status-badge ' + (d.router_enabled ? 'active' : 'inactive');
                 document.getElementById('statusText').textContent = d.router_enabled ? 'Active' : 'Stopped';
                 
+                // Update stable mode badge
+                const mode = d.checks?.stable_mode || 'study';
+                document.getElementById('stableModeText').textContent = 'Mode: ' + mode;
+                const modeBadge = document.getElementById('stableModeBadge');
+                if (mode === 'series') {
+                    modeBadge.style.background = 'var(--oe-primary)';
+                    modeBadge.style.color = '#fff';
+                } else {
+                    modeBadge.style.background = 'var(--oe-sidebar-bg)';
+                    modeBadge.style.color = 'var(--oe-sidebar-text)';
+                }
+                
                 document.getElementById('statProcessed').textContent = d.metrics?.counters?.studies_processed || 0;
                 document.getElementById('statForwarded').textContent = d.metrics?.counters?.studies_forwarded || 0;
+                document.getElementById('statSeriesProcessed').textContent = d.metrics?.counters?.series_processed || 0;
+                document.getElementById('statSeriesForwarded').textContent = d.metrics?.counters?.series_forwarded || 0;
                 document.getElementById('statRules').textContent = d.rules?.count || 0;
                 document.getElementById('statDeferred').textContent = d.deferred?.total_tasks || 0;
                 
@@ -1449,6 +1475,8 @@
             try {
                 const r = await fetch('/dicom-router/config');
                 const cfg = await r.json();
+                console.log('Config loaded:', cfg);
+                console.log('STABLE_MODE value:', cfg.STABLE_MODE, 'type:', typeof cfg.STABLE_MODE);
                 const fields = [
                     { k: 'STABLE_MODE', l: 'Stable Mode', t: 'select', icon: 'bi-layers', 
                       options: ['study', 'series'], hint: 'Study: route when entire study is stable (slower, complete). Series: route each series as it stabilizes (faster, per-series)' },
@@ -1466,11 +1494,13 @@
                 
                 document.getElementById('configForm').innerHTML = fields.map(f => {
                     if (f.t === 'select') {
+                        const currentValue = String(cfg[f.k] || '').toLowerCase().trim();
                         return `<div style="margin-bottom: 1rem;">
                             <label class="form-label-oe2"><i class="bi ${f.icon}"></i> ${f.l}</label>
                             <select id="cfg_${f.k}" class="form-control-oe2">
-                                ${f.options.map(o => `<option value="${o}" ${cfg[f.k] === o ? 'selected' : ''}>${o}</option>`).join('')}
+                                ${f.options.map(o => `<option value="${o}" ${currentValue === o ? 'selected' : ''}>${o}</option>`).join('')}
                             </select>
+                            ${f.hint ? `<div class="info-hint" style="margin-top: 0.25rem;">${f.hint}</div>` : ''}
                         </div>`;
                     }
                     if (f.t === 'checkbox') {
@@ -1498,6 +1528,8 @@
                 else if (k === 'STABLE_MODE') cfg[k] = i.value;
                 else cfg[k] = parseInt(i.value);
             });
+            console.log('Saving config:', cfg);
+            console.log('STABLE_MODE to save:', cfg.STABLE_MODE);
             try {
                 const r = await fetch('/dicom-router/config', {
                     method: 'POST',

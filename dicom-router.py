@@ -745,9 +745,10 @@ class Config:
                         if value not in ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']:
                             value = 'INFO'
                     elif key == 'STABLE_MODE':
-                        value = str(value).lower()
+                        value = str(value).lower().strip()
                         if value not in ['study', 'series']:
                             value = 'study'
+                        logger.info(f"Stable mode changed to: {value}")
                     elif key == 'WATCH_FOLDER_EXTENSIONS':
                         value = str(value)
                     
@@ -2294,6 +2295,7 @@ def process_series(series_id: str):
             try:
                 # For series mode, we forward the series (not the whole study)
                 forward_to_modality(dest, series_id)
+                metrics.increment('series_forwarded')
             except Exception as e:
                 logger.error(f"Forward failed to {dest}: {str(e)[:100]}")
                 deferred_queue.add(series_id, dest, str(e), patient_name, modality_str)
@@ -2383,6 +2385,7 @@ def HealthCallback(output, uri, **request):
             'database': db_status,
             'disk_space': 'ok' if disk_ok else 'low',
             'router_enabled': Config.ROUTER_ENABLED,
+            'stable_mode': Config.STABLE_MODE,
         },
         'version': __version__,
         'timestamp': datetime.utcnow().isoformat(),
