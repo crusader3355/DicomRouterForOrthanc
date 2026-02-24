@@ -1450,6 +1450,8 @@
                 const r = await fetch('/dicom-router/config');
                 const cfg = await r.json();
                 const fields = [
+                    { k: 'STABLE_MODE', l: 'Stable Mode', t: 'select', icon: 'bi-layers', 
+                      options: ['study', 'series'], hint: 'Study: route when entire study is stable (slower, complete). Series: route each series as it stabilizes (faster, per-series)' },
                     { k: 'CONNECTIVITY_CHECK_ENABLED', l: 'Connectivity Check', t: 'checkbox', icon: 'bi-wifi' },
                     { k: 'ECHO_TIMEOUT', l: 'Echo Timeout (sec)', t: 'number', icon: 'bi-clock' },
                     { k: 'ECHO_CACHE_TTL', l: 'Cache TTL (sec)', t: 'number', icon: 'bi-clock-history' },
@@ -1493,6 +1495,7 @@
                 const k = i.id.replace('cfg_', '');
                 if (i.type === 'checkbox') cfg[k] = i.checked;
                 else if (i.tagName === 'SELECT') cfg[k] = i.value;
+                else if (k === 'STABLE_MODE') cfg[k] = i.value;
                 else cfg[k] = parseInt(i.value);
             });
             try {

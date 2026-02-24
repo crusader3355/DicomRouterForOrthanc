@@ -639,6 +639,9 @@ class Config:
     
     ROUTER_ENABLED: bool = True
     
+    # Stable mode: 'study' - wait for complete study, 'series' - route per series
+    STABLE_MODE: str = os.getenv('ORTHANC_STABLE_MODE', 'study').lower()
+    
     WATCH_FOLDER_ENABLED: bool = os.getenv('ORTHANC_WATCH_ENABLED', 'false').lower() == 'true'
     WATCH_FOLDER_PATH: str = os.getenv('ORTHANC_WATCH_PATH', r'C:\Orthanc\Incoming' if platform.system() == 'Windows' else '/var/lib/orthanc/incoming')
     WATCH_FOLDER_INTERVAL: int = int(os.getenv('ORTHANC_WATCH_INTERVAL', '5'))
@@ -670,6 +673,7 @@ class Config:
                 'COMPRESS': cls.COMPRESS,
                 'PROCESSING_WORKERS': cls.PROCESSING_WORKERS,
                 'ROUTER_ENABLED': cls.ROUTER_ENABLED,
+                'STABLE_MODE': cls.STABLE_MODE,
                 'LOG_LEVEL': cls.LOG_LEVEL,
                 'WATCH_FOLDER_ENABLED': cls.WATCH_FOLDER_ENABLED,
                 'WATCH_FOLDER_PATH': cls.WATCH_FOLDER_PATH,
@@ -740,6 +744,10 @@ class Config:
                         value = str(value).upper()
                         if value not in ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']:
                             value = 'INFO'
+                    elif key == 'STABLE_MODE':
+                        value = str(value).lower()
+                        if value not in ['study', 'series']:
+                            value = 'study'
                     elif key == 'WATCH_FOLDER_EXTENSIONS':
                         value = str(value)
                     
@@ -1648,9 +1656,14 @@ class StudyProcessingQueue:
         self._shutdown = threading.Event()
         self._num_workers = num_workers
     
-    def enqueue(self, study_id: str) -> bool:
+    def enqueue(self, item) -> bool:
+        """Enqueue a study or series for processing.
+        item can be:
+        - str: study_id (backward compatibility)
+        - tuple: ('study', study_id) or ('series', series_id)
+        """
         try:
-            self._queue.put_nowait(study_id)
+            self._queue.put_nowait(item)
             metrics.increment('studies_queued')
             return True
         except:
@@ -1682,11 +1695,24 @@ class StudyProcessingQueue:
     def _worker_loop(self):
         while not self._shutdown.is_set():
             try:
-                study_id = self._queue.get(timeout=1)
-                if study_id is None:
+                item = self._queue.get(timeout=1)
+                if item is None:
                     break
-                if Config.ROUTER_ENABLED:
-                    process_study(study_id)
+                if not Config.ROUTER_ENABLED:
+                    self._queue.task_done()
+                    continue
+                
+                # Handle both old format (str) and new format (tuple)
+                if isinstance(item, tuple):
+                    resource_type, resource_id = item
+                    if resource_type == 'series':
+                        process_series(resource_id)
+                    else:
+                        process_study(resource_id)
+                else:
+                    # Backward compatibility: treat as study
+                    process_study(item)
+                
                 self._queue.task_done()
             except Empty:
                 continue
@@ -2173,17 +2199,132 @@ def process_study(resource_id: str):
         metrics.increment('studies_errors')
 
 
+@timed('process_series')
+def process_series(series_id: str):
+    """Process a stable series (for series-level routing mode).
+    
+    In series mode, each series is routed independently as soon as it stabilizes.
+    This provides faster routing but may result in multiple C-MOVE operations
+    for the same study if multiple series arrive.
+    """
+    metrics.increment('series_processed')
+    try:
+        # Get series info
+        series_response = orthanc.RestApiGet(f'/series/{series_id}')
+        series = safe_json_loads(series_response, {})
+        
+        if not series:
+            logger.error(f"Could not load series {series_id[:20]}")
+            return
+        
+        # Get parent study info
+        parent_study_id = series.get('ParentStudy')
+        if not parent_study_id:
+            logger.error(f"Series {series_id[:20]} has no parent study")
+            return
+        
+        # Get study info for patient data
+        study_response = orthanc.RestApiGet(f'/studies/{parent_study_id}')
+        study = safe_json_loads(study_response, {})
+        
+        if not study:
+            logger.error(f"Could not load parent study for series {series_id[:20]}")
+            return
+        
+        patient_tags = study.get('PatientMainDicomTags', {})
+        patient_name = patient_tags.get('PatientName', 'Unknown')
+        patient_id = patient_tags.get('PatientID', 'Unknown')
+        
+        # Log only masked version for HIPAA
+        logger.info(f"Processing series: PatientID={patient_id[:3]}***, SeriesID={series_id[:20]}...")
+        
+        # Build data for rule evaluation
+        series_data = expand_dicom_attributes({
+            **series.get('MainDicomTags', {}),
+            **study.get('MainDicomTags', {}),
+            **patient_tags,
+        })
+        
+        # Get modality from series
+        series_modality = series.get('MainDicomTags', {}).get('Modality', '')
+        if series_modality:
+            series_data['ModalitiesInStudy'] = [series_modality.upper()]
+        
+        # Get RemoteAET from first instance
+        try:
+            instances = series.get('Instances', [])
+            if instances:
+                meta_resp = orthanc.RestApiGet(f'/instances/{instances[0]}/metadata?expand')
+                metadata = safe_json_loads(meta_resp, {})
+                remote_aet = metadata.get('RemoteAET') or metadata.get('CalledAET', '')
+                if remote_aet:
+                    series_data['RemoteAET'] = remote_aet
+        except Exception as e:
+            logger.debug(f"Could not get RemoteAET for series: {e}")
+        
+        # Evaluate rules
+        destinations = rules_manager.evaluate(series_data)
+        
+        if not destinations:
+            logger.info(f"No matching rules for series {series_id[:20]}")
+            return
+        
+        logger.info(f"Routing series {series_id[:20]}... to: {', '.join(destinations)}")
+        
+        metrics.add_history({
+            'series_id': series_id,
+            'study_id': parent_study_id,
+            'patient': '***',  # Masked for logs
+            'destinations': list(destinations),
+            'status': 'processing',
+            'modality': series_modality
+        })
+        
+        # Route to destinations
+        modality_str = series_modality or 'Unknown'
+        
+        for dest in destinations:
+            if Config.CONNECTIVITY_CHECK_ENABLED:
+                is_ok, error = connectivity_checker.check(dest)
+                if not is_ok:
+                    logger.warning(f"Connectivity check failed for {dest}, deferring series")
+                    deferred_queue.add(series_id, dest, error, patient_name, modality_str)
+                    continue
+            
+            try:
+                # For series mode, we forward the series (not the whole study)
+                forward_to_modality(dest, series_id)
+            except Exception as e:
+                logger.error(f"Forward failed to {dest}: {str(e)[:100]}")
+                deferred_queue.add(series_id, dest, str(e), patient_name, modality_str)
+    
+    except Exception as e:
+        logger.error(f"Error processing series {series_id[:20]}: {e}")
+        logger.debug(traceback.format_exc())
+        metrics.increment('series_errors')
+
+
 # =============================================================================
 # ORTHANC CALLBACK
 # =============================================================================
 
 def OnChange(changeType, level, resourceId):
-    if changeType != orthanc.ChangeType.STABLE_STUDY:
-        return
+    # Check if router is enabled
     if not Config.ROUTER_ENABLED:
         return
-    if not study_queue.enqueue(resourceId):
-        logger.warning(f"Failed to queue study {resourceId}")
+    
+    # Handle based on stable mode configuration
+    if Config.STABLE_MODE == 'series':
+        # In series mode: process each series as it stabilizes
+        if changeType == orthanc.ChangeType.STABLE_SERIES:
+            if not study_queue.enqueue(('series', resourceId)):
+                logger.warning(f"Failed to queue series {resourceId}")
+        return
+    else:
+        # Default study mode: wait for complete study
+        if changeType == orthanc.ChangeType.STABLE_STUDY:
+            if not study_queue.enqueue(('study', resourceId)):
+                logger.warning(f"Failed to queue study {resourceId}")
 
 
 # =============================================================================
