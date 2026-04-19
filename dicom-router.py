@@ -44,6 +44,9 @@ import atexit
 import hashlib
 import sqlite3
 import signal
+import zipfile
+import tempfile
+import shutil
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional, Tuple, Set, Callable
 from functools import wraps, lru_cache
@@ -205,6 +208,18 @@ def ensure_directory(filepath: str) -> bool:
         return False
 
 
+def format_size(size_bytes: int) -> str:
+    """Format byte size to human readable string."""
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    elif size_bytes < 1024 ** 2:
+        return f"{size_bytes / 1024:.1f} KB"
+    elif size_bytes < 1024 ** 3:
+        return f"{size_bytes / (1024 ** 2):.1f} MB"
+    else:
+        return f"{size_bytes / (1024 ** 3):.2f} GB"
+
+
 def safe_json_loads(data: Any, default: Any = None) -> Any:
     """Safely parse JSON with fallback."""
     if data is None:
@@ -353,6 +368,32 @@ class DatabaseManager:
                 cursor.execute('''
                     CREATE INDEX IF NOT EXISTS idx_hash 
                     ON processed_files(file_hash)
+                ''')
+                
+                # Deferred tasks table
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS deferred_tasks (
+                        task_key TEXT PRIMARY KEY,
+                        study_id TEXT,
+                        destination TEXT,
+                        patient_name TEXT,
+                        modality TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        next_retry_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        retry_count INTEGER DEFAULT 0,
+                        last_error TEXT,
+                        status TEXT DEFAULT 'deferred'
+                    )
+                ''')
+                
+                cursor.execute('''
+                    CREATE INDEX IF NOT EXISTS idx_deferred_status 
+                    ON deferred_tasks(status)
+                ''')
+                
+                cursor.execute('''
+                    CREATE INDEX IF NOT EXISTS idx_deferred_retry 
+                    ON deferred_tasks(next_retry_at)
                 ''')
                 
                 conn.commit()
@@ -578,6 +619,193 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"Migration error: {e}")
     
+    # -------------------------------------------------------------------------
+    # DEFERRED TASKS
+    # -------------------------------------------------------------------------
+    
+    def add_deferred_task(self, task: 'ForwardTask') -> bool:
+        """Insert or update deferred task in DB."""
+        try:
+            with self._lock:
+                conn = sqlite3.connect(self.db_path)
+                try:
+                    cursor = conn.cursor()
+                    cursor.execute('''
+                        INSERT INTO deferred_tasks 
+                        (task_key, study_id, destination, patient_name, modality,
+                         created_at, next_retry_at, retry_count, last_error, status)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(task_key) DO UPDATE SET
+                            study_id=excluded.study_id,
+                            destination=excluded.destination,
+                            patient_name=excluded.patient_name,
+                            modality=excluded.modality,
+                            next_retry_at=excluded.next_retry_at,
+                            retry_count=excluded.retry_count,
+                            last_error=excluded.last_error,
+                            status=excluded.status
+                    ''', (
+                        f"{task.study_id}:{task.destination}",
+                        task.study_id,
+                        task.destination,
+                        task.patient_name,
+                        task.modality,
+                        task.created_at.isoformat(),
+                        task.next_retry_at.isoformat(),
+                        task.retry_count,
+                        task.last_error,
+                        task.status.value
+                    ))
+                    conn.commit()
+                    return True
+                finally:
+                    conn.close()
+        except Exception as e:
+            logger.error(f"DB add_deferred_task error: {e}")
+            return False
+    
+    def get_deferred_task(self, task_key: str) -> Optional[Dict[str, Any]]:
+        """Get single deferred task by key."""
+        try:
+            with self._lock:
+                conn = sqlite3.connect(self.db_path)
+                try:
+                    cursor = conn.cursor()
+                    cursor.execute('''
+                        SELECT task_key, study_id, destination, patient_name, modality,
+                               created_at, next_retry_at, retry_count, last_error, status
+                        FROM deferred_tasks WHERE task_key = ?
+                    ''', (task_key,))
+                    row = cursor.fetchone()
+                    if row:
+                        return {
+                            'task_key': row[0], 'study_id': row[1], 'destination': row[2],
+                            'patient_name': row[3], 'modality': row[4],
+                            'created_at': row[5], 'next_retry_at': row[6],
+                            'retry_count': row[7], 'last_error': row[8], 'status': row[9]
+                        }
+                    return None
+                finally:
+                    conn.close()
+        except Exception as e:
+            logger.error(f"DB get_deferred_task error: {e}")
+            return None
+    
+    def get_all_deferred_tasks(self) -> List[Dict[str, Any]]:
+        """Get all deferred tasks."""
+        try:
+            with self._lock:
+                conn = sqlite3.connect(self.db_path)
+                try:
+                    cursor = conn.cursor()
+                    cursor.execute('''
+                        SELECT task_key, study_id, destination, patient_name, modality,
+                               created_at, next_retry_at, retry_count, last_error, status
+                        FROM deferred_tasks
+                    ''')
+                    rows = cursor.fetchall()
+                    return [
+                        {
+                            'task_key': r[0], 'study_id': r[1], 'destination': r[2],
+                            'patient_name': r[3], 'modality': r[4],
+                            'created_at': r[5], 'next_retry_at': r[6],
+                            'retry_count': r[7], 'last_error': r[8], 'status': r[9]
+                        }
+                        for r in rows
+                    ]
+                finally:
+                    conn.close()
+        except Exception as e:
+            logger.error(f"DB get_all_deferred_tasks error: {e}")
+            return []
+    
+    def get_ready_deferred_tasks(self) -> List[Dict[str, Any]]:
+        """Get tasks ready for retry (status='deferred' and next_retry_at <= now)."""
+        try:
+            with self._lock:
+                conn = sqlite3.connect(self.db_path)
+                try:
+                    cursor = conn.cursor()
+                    cursor.execute('''
+                        SELECT task_key, study_id, destination, patient_name, modality,
+                               created_at, next_retry_at, retry_count, last_error, status
+                        FROM deferred_tasks
+                        WHERE status = 'deferred' AND next_retry_at <= datetime('now')
+                    ''')
+                    rows = cursor.fetchall()
+                    # Mark as in_progress
+                    for r in rows:
+                        cursor.execute('''
+                            UPDATE deferred_tasks SET status = 'in_progress' WHERE task_key = ?
+                        ''', (r[0],))
+                    conn.commit()
+                    return [
+                        {
+                            'task_key': r[0], 'study_id': r[1], 'destination': r[2],
+                            'patient_name': r[3], 'modality': r[4],
+                            'created_at': r[5], 'next_retry_at': r[6],
+                            'retry_count': r[7], 'last_error': r[8], 'status': 'in_progress'
+                        }
+                        for r in rows
+                    ]
+                finally:
+                    conn.close()
+        except Exception as e:
+            logger.error(f"DB get_ready_deferred_tasks error: {e}")
+            return []
+    
+    def delete_deferred_task(self, task_key: str) -> bool:
+        """Delete deferred task from DB."""
+        try:
+            with self._lock:
+                conn = sqlite3.connect(self.db_path)
+                try:
+                    cursor = conn.cursor()
+                    cursor.execute('DELETE FROM deferred_tasks WHERE task_key = ?', (task_key,))
+                    conn.commit()
+                    return cursor.rowcount > 0
+                finally:
+                    conn.close()
+        except Exception as e:
+            logger.error(f"DB delete_deferred_task error: {e}")
+            return False
+    
+    def clear_deferred_tasks(self) -> int:
+        """Delete all deferred tasks."""
+        try:
+            with self._lock:
+                conn = sqlite3.connect(self.db_path)
+                try:
+                    cursor = conn.cursor()
+                    cursor.execute('DELETE FROM deferred_tasks')
+                    conn.commit()
+                    return cursor.rowcount
+                finally:
+                    conn.close()
+        except Exception as e:
+            logger.error(f"DB clear_deferred_tasks error: {e}")
+            return 0
+    
+    def get_deferred_stats(self) -> Dict[str, Any]:
+        """Get deferred tasks statistics."""
+        try:
+            with self._lock:
+                conn = sqlite3.connect(self.db_path)
+                try:
+                    cursor = conn.cursor()
+                    cursor.execute('SELECT COUNT(*) FROM deferred_tasks')
+                    total = cursor.fetchone()[0]
+                    cursor.execute('''
+                        SELECT status, COUNT(*) FROM deferred_tasks GROUP BY status
+                    ''')
+                    by_status = {row[0]: row[1] for row in cursor.fetchall()}
+                    return {'total': total, 'by_status': by_status}
+                finally:
+                    conn.close()
+        except Exception as e:
+            logger.error(f"DB get_deferred_stats error: {e}")
+            return {'total': 0, 'by_status': {}}
+    
     def close(self):
         """Close database, flush remaining batch."""
         self._flush_batch()
@@ -627,6 +855,8 @@ class Config:
     
     MAX_RULES: int = int(os.getenv('ORTHANC_MAX_RULES', '100'))
     MAX_DEFERRED_TASKS: int = int(os.getenv('ORTHANC_MAX_DEFERRED', '1000'))
+    DEFERRED_AUTO_REMOVE: bool = os.getenv('ORTHANC_DEFERRED_AUTO_REMOVE', 'true').lower() == 'true'
+    DEFERRED_KEEP_FAILED: bool = os.getenv('ORTHANC_DEFERRED_KEEP_FAILED', 'false').lower() == 'true'
     MAX_LOG_ENTRIES: int = int(os.getenv('ORTHANC_MAX_LOG_ENTRIES', '1000'))
     MAX_HISTORY_ENTRIES: int = int(os.getenv('ORTHANC_MAX_HISTORY', '100'))
     
@@ -685,6 +915,8 @@ class Config:
                 'WATCH_FOLDER_BATCH_INTERVAL': cls.WATCH_FOLDER_BATCH_INTERVAL,
                 'WATCH_FOLDER_MIN_FILE_AGE': cls.WATCH_FOLDER_MIN_FILE_AGE,
                 'WATCH_FOLDER_MAX_DEPTH': cls.WATCH_FOLDER_MAX_DEPTH,
+                'DEFERRED_AUTO_REMOVE': cls.DEFERRED_AUTO_REMOVE,
+                'DEFERRED_KEEP_FAILED': cls.DEFERRED_KEEP_FAILED,
             }
     
     @classmethod
@@ -765,8 +997,12 @@ class Config:
                         
                         if key.startswith('WATCH_FOLDER_') and watch_folder_manager:
                             if key == 'WATCH_FOLDER_ENABLED':
-                                if value and not watch_folder_manager.is_alive():
-                                    watch_folder_manager.start()
+                                if value:
+                                    if not watch_folder_manager.is_alive():
+                                        # Thread can only be started once - create new instance
+                                        watch_folder_manager = WatchFolderManager()
+                                        watch_folder_manager.start()
+                                        logger.info("Watch Folder: started")
                                 elif not value and watch_folder_manager.is_alive():
                                     watch_folder_manager.stop()
                             
@@ -1198,6 +1434,112 @@ class WatchFolderManager(threading.Thread):
         metrics.add_watch_folder_log('BATCH_COMPLETE', f"Success: {success_count}, Failed: {fail_count}", "Complete")
         logger.info(f"Watch Folder: batch complete - OK:{success_count}, Failed:{fail_count}")
     
+    def _import_dicom(self, content: bytes, filename: str) -> Optional[str]:
+        """Import DICOM content to Orthanc. Returns patient name or None on failure."""
+        try:
+            response = orthanc.RestApiPost('/instances', content)
+            result = safe_json_loads(response, {})
+            
+            if not result or 'ID' not in result:
+                logger.error(f"Watch Folder: import failed for {filename}")
+                return None
+            
+            instance_id = result['ID']
+            
+            try:
+                tags_resp = orthanc.RestApiGet(f'/instances/{instance_id}/simplified-tags')
+                tags = safe_json_loads(tags_resp, {})
+                return tags.get('PatientName', 'Unknown')
+            except Exception:
+                return 'Unknown'
+                
+        except Exception as e:
+            logger.error(f"Watch Folder: import error for {filename}: {e}")
+            return None
+    
+    def _process_zip_archive(self, filepath: str) -> bool:
+        """Extract and import DICOM files from zip archive."""
+        filename = os.path.basename(filepath)
+        file_size = os.path.getsize(filepath)
+        metrics.add_watch_folder_log('PROCESSING', filename, f"ZIP archive, {format_size(file_size)}")
+        
+        temp_dir = None
+        try:
+            temp_dir = tempfile.mkdtemp(prefix='orthanc_zip_')
+            
+            with zipfile.ZipFile(filepath, 'r') as zf:
+                # Extract all files
+                zf.extractall(temp_dir)
+            
+            # Find all DICOM files in extracted content
+            imported_count = 0
+            failed_count = 0
+            patient_name = ""
+            
+            for root, dirs, files in os.walk(temp_dir):
+                for fname in sorted(files):
+                    fpath = os.path.join(root, fname)
+                    try:
+                        with open(fpath, 'rb') as f:
+                            content = f.read()
+                        
+                        if not content:
+                            continue
+                        
+                        # Try to import as DICOM
+                        pname = self._import_dicom(content, fname)
+                        if pname is not None:
+                            imported_count += 1
+                            patient_name = pname or patient_name
+                        else:
+                            failed_count += 1
+                            
+                    except Exception as e:
+                        logger.debug(f"Watch Folder: skip {fname}: {e}")
+            
+            if imported_count > 0:
+                logger.info(f"Watch Folder: imported {imported_count} files from {filename}")
+                metrics.add_watch_folder_log('IMPORTED', filename, f"{imported_count} files extracted")
+                
+                # Mark original zip as processed
+                file_hash = self._get_file_hash(filepath)
+                with self._lock:
+                    self._processed_files.add(file_hash)
+                    self._files_processed += 1
+                
+                self._save_to_db(file_hash, filepath, file_size, patient_name)
+                
+                if Config.WATCH_FOLDER_DELETE_ORIGINALS:
+                    try:
+                        time.sleep(0.1)
+                        os.remove(filepath)
+                    except Exception as e:
+                        logger.error(f"Watch Folder: cannot delete {filename}: {e}")
+                
+                metrics.increment('watchfolder_imported')
+                return True
+            else:
+                logger.error(f"Watch Folder: no DICOM files found in {filename}")
+                metrics.add_watch_folder_log('ERROR', filename, "No DICOM files in archive")
+                metrics.increment('watchfolder_failed')
+                return False
+                
+        except zipfile.BadZipFile:
+            logger.error(f"Watch Folder: invalid zip file {filename}")
+            metrics.add_watch_folder_log('ERROR', filename, "Invalid ZIP archive")
+            metrics.increment('watchfolder_failed')
+            return False
+        except Exception as e:
+            logger.error(f"Watch Folder: zip processing error {filename}: {e}")
+            metrics.increment('watchfolder_failed')
+            return False
+        finally:
+            if temp_dir and os.path.exists(temp_dir):
+                try:
+                    shutil.rmtree(temp_dir)
+                except Exception:
+                    pass
+    
     def _process_single_file(self, filepath: str) -> bool:
         filename = os.path.basename(filepath)
         
@@ -1205,8 +1547,12 @@ class WatchFolderManager(threading.Thread):
             if not self._is_file_ready(filepath):
                 return False
             
+            # Handle ZIP archives
+            if filename.lower().endswith('.zip'):
+                return self._process_zip_archive(filepath)
+            
             file_size = os.path.getsize(filepath)
-            metrics.add_watch_folder_log('PROCESSING', filename, f"Size: {file_size} bytes")
+            metrics.add_watch_folder_log('PROCESSING', filename, f"Size: {format_size(file_size)}")
             
             with open(filepath, 'rb') as f:
                 content = f.read()
@@ -1215,30 +1561,14 @@ class WatchFolderManager(threading.Thread):
                 logger.warning(f"Watch Folder: empty file {filename}")
                 return False
             
-            logger.info(f"Watch Folder: uploading {filename} ({len(content)} bytes)...")
-            response = orthanc.RestApiPost('/instances', content)
-            result = safe_json_loads(response, {})
+            logger.info(f"Watch Folder: uploading {filename} ({format_size(len(content))})...")
+            patient_name = self._import_dicom(content, filename)
             
-            if not result or 'ID' not in result:
-                logger.error(f"Watch Folder: import failed for {filename}")
+            if patient_name is None:
                 metrics.increment('watchfolder_failed')
                 return False
             
-            instance_id = result['ID']
-            patient_name = ""
-            
-            try:
-                tags_resp = orthanc.RestApiGet(f'/instances/{instance_id}/simplified-tags')
-                tags = safe_json_loads(tags_resp, {})
-                patient_name = tags.get('PatientName', 'Unknown')
-                study_desc = tags.get('StudyDescription', 'Unknown')
-                log_msg = f"Imported: {patient_name} - {study_desc}"
-                logger.info(f"Watch Folder: imported {filename}")
-                metrics.add_watch_folder_log('IMPORTED', filename, "Study processed")
-                
-            except Exception as e:
-                logger.debug(f"Watch Folder: metadata error: {e}")
-                metrics.add_watch_folder_log('IMPORTED', filename, f"ID: {instance_id}")
+            metrics.add_watch_folder_log('IMPORTED', filename, "Study processed")
             
             file_hash = self._get_file_hash(filepath)
             with self._lock:
@@ -1518,32 +1848,104 @@ class ForwardTask:
 
 class DeferredTaskQueue:
     def __init__(self):
-        self._tasks: Dict[str, ForwardTask] = {}
+        self._tasks_cache: Dict[str, ForwardTask] = {}
         self._lock = threading.RLock()
         self._worker: Optional[threading.Thread] = None
         self._shutdown = threading.Event()
+        self._cache_loaded = False
+    
+    def _ensure_cache(self):
+        """Load tasks from DB into memory cache if not already loaded."""
+        global db_manager
+        if self._cache_loaded or not db_manager:
+            return
+        try:
+            rows = db_manager.get_all_deferred_tasks()
+            with self._lock:
+                for row in rows:
+                    key = row['task_key']
+                    task = ForwardTask(
+                        study_id=row['study_id'],
+                        destination=row['destination'],
+                        patient_name=row['patient_name'] or '',
+                        modality=row['modality'] or '',
+                        created_at=self._parse_dt(row['created_at']),
+                        next_retry_at=self._parse_dt(row['next_retry_at']),
+                        retry_count=row['retry_count'] or 0,
+                        last_error=row['last_error'],
+                        status=TaskStatus(row['status']) if row['status'] else TaskStatus.DEFERRED
+                    )
+                    self._tasks_cache[key] = task
+            self._cache_loaded = True
+            if rows:
+                logger.info(f"DeferredQueue: loaded {len(rows)} tasks from DB")
+        except Exception as e:
+            logger.error(f"DeferredQueue: cache load error: {e}")
+    
+    @staticmethod
+    def _parse_dt(value) -> datetime:
+        """Parse datetime from ISO string or return now."""
+        if isinstance(value, datetime):
+            return value
+        if value:
+            try:
+                # SQLite returns strings like '2024-01-15 10:30:00'
+                return datetime.fromisoformat(value.replace(' ', 'T'))
+            except:
+                pass
+        return datetime.utcnow()
+    
+    def _db_upsert(self, task: ForwardTask):
+        """Save task to DB."""
+        global db_manager
+        if db_manager:
+            db_manager.add_deferred_task(task)
+    
+    def _db_delete(self, key: str):
+        """Delete task from DB."""
+        global db_manager
+        if db_manager:
+            db_manager.delete_deferred_task(key)
     
     def add(self, study_id: str, destination: str, error: str = "",
             patient_name: str = "", modality: str = "") -> bool:
+        self._ensure_cache()
         key = f"{study_id}:{destination}"
         
         with self._lock:
-            if key in self._tasks:
-                task = self._tasks[key]
+            if key in self._tasks_cache:
+                task = self._tasks_cache[key]
                 task.retry_count += 1
                 task.last_error = error
                 task.next_retry_at = task.calculate_next_retry()
                 task.status = TaskStatus.DEFERRED
                 
                 if not task.should_retry():
-                    del self._tasks[key]
-                    metrics.increment('tasks_failed')
-                    return False
+                    # Max retries exceeded
+                    if Config.DEFERRED_AUTO_REMOVE:
+                        del self._tasks_cache[key]
+                        self._db_delete(key)
+                        metrics.increment('tasks_failed')
+                        logger.info(f"Task failed (max retries): {key}, removed")
+                        return False
+                    else:
+                        # Keep in DB with 'failed' status
+                        task.status = TaskStatus.FAILED
+                        self._db_upsert(task)
+                        metrics.increment('tasks_failed')
+                        logger.info(f"Task failed (max retries): {key}, kept in DB")
+                        return False
                 
                 logger.info(f"Task deferred: {key}, retry #{task.retry_count}")
+                self._db_upsert(task)
             else:
-                if len(self._tasks) >= Config.MAX_DEFERRED_TASKS:
-                    return False
+                # Check capacity against DB
+                global db_manager
+                if db_manager:
+                    stats = db_manager.get_deferred_stats()
+                    if stats['total'] >= Config.MAX_DEFERRED_TASKS:
+                        logger.warning(f"Deferred queue full ({stats['total']}/{Config.MAX_DEFERRED_TASKS})")
+                        return False
                 
                 task = ForwardTask(
                     study_id=study_id,
@@ -1554,54 +1956,180 @@ class DeferredTaskQueue:
                     status=TaskStatus.DEFERRED
                 )
                 task.next_retry_at = task.calculate_next_retry()
-                self._tasks[key] = task
+                self._tasks_cache[key] = task
+                self._db_upsert(task)
             
             metrics.increment('tasks_deferred')
             return True
     
     def get_ready(self) -> List[ForwardTask]:
-        now = datetime.utcnow()
-        ready = []
-        with self._lock:
-            for task in self._tasks.values():
-                if task.status == TaskStatus.DEFERRED and task.next_retry_at <= now:
-                    task.status = TaskStatus.IN_PROGRESS
+        self._ensure_cache()
+        global db_manager
+        
+        if db_manager:
+            # Get ready tasks directly from DB (atomically marks as in_progress)
+            rows = db_manager.get_ready_deferred_tasks()
+            ready = []
+            with self._lock:
+                for row in rows:
+                    key = row['task_key']
+                    task = ForwardTask(
+                        study_id=row['study_id'],
+                        destination=row['destination'],
+                        patient_name=row['patient_name'] or '',
+                        modality=row['modality'] or '',
+                        created_at=self._parse_dt(row['created_at']),
+                        next_retry_at=self._parse_dt(row['next_retry_at']),
+                        retry_count=row['retry_count'] or 0,
+                        last_error=row['last_error'],
+                        status=TaskStatus.IN_PROGRESS
+                    )
+                    self._tasks_cache[key] = task
                     ready.append(task)
-        return ready
+            return ready
+        else:
+            # Fallback to in-memory
+            now = datetime.utcnow()
+            ready = []
+            with self._lock:
+                for task in self._tasks_cache.values():
+                    if task.status == TaskStatus.DEFERRED and task.next_retry_at <= now:
+                        task.status = TaskStatus.IN_PROGRESS
+                        ready.append(task)
+            return ready
     
     def complete(self, study_id: str, destination: str, success: bool, error: str = "",
                  patient_name: str = "", modality: str = ""):
+        self._ensure_cache()
         key = f"{study_id}:{destination}"
+        
         with self._lock:
-            if key not in self._tasks:
-                return
-            task = self._tasks[key]
-            if success:
-                del self._tasks[key]
-                metrics.increment('tasks_completed')
-            else:
-                self.add(study_id, destination, error, patient_name, modality)
+            if key in self._tasks_cache:
+                task = self._tasks_cache[key]
+                if success:
+                    del self._tasks_cache[key]
+                    self._db_delete(key)
+                    metrics.increment('tasks_completed')
+                else:
+                    # Retry failed — update task and save to DB
+                    task.retry_count += 1
+                    task.last_error = error
+                    task.next_retry_at = task.calculate_next_retry()
+                    task.status = TaskStatus.DEFERRED
+                    
+                    if not task.should_retry():
+                        if Config.DEFERRED_AUTO_REMOVE:
+                            del self._tasks_cache[key]
+                            self._db_delete(key)
+                            metrics.increment('tasks_failed')
+                            logger.info(f"Task failed permanently: {key}, removed")
+                        else:
+                            task.status = TaskStatus.FAILED
+                            self._db_upsert(task)
+                            metrics.increment('tasks_failed')
+                            logger.info(f"Task failed permanently: {key}, kept in DB")
+                    else:
+                        self._db_upsert(task)
+                        logger.info(f"Task retry scheduled: {key}, retry #{task.retry_count}")
     
     def get_all(self) -> List[Dict]:
+        self._ensure_cache()
+        global db_manager
+        
+        if db_manager:
+            # Always fresh data from DB
+            rows = db_manager.get_all_deferred_tasks()
+            result = []
+            for row in rows:
+                result.append({
+                    'study_id': row['study_id'],
+                    'destination': row['destination'],
+                    'patient_name': row['patient_name'] or '',
+                    'modality': row['modality'] or '',
+                    'created_at': row['created_at'],
+                    'next_retry_at': row['next_retry_at'],
+                    'retry_count': row['retry_count'] or 0,
+                    'last_error': row['last_error'],
+                    'status': row['status'] or 'deferred'
+                })
+            return result
+        else:
+            with self._lock:
+                return [t.to_dict() for t in self._tasks_cache.values()]
+    
+    def get_task(self, study_id: str, destination: str) -> Optional[ForwardTask]:
+        """Get task by key, loading from DB if not in cache."""
+        self._ensure_cache()
+        key = f"{study_id}:{destination}"
+        
         with self._lock:
-            return [t.to_dict() for t in self._tasks.values()]
+            if key in self._tasks_cache:
+                return self._tasks_cache[key]
+            
+            # Try to load from DB
+            global db_manager
+            if db_manager:
+                row = db_manager.get_deferred_task(key)
+                if row:
+                    task = ForwardTask(
+                        study_id=row['study_id'],
+                        destination=row['destination'],
+                        patient_name=row['patient_name'] or '',
+                        modality=row['modality'] or '',
+                        created_at=self._parse_dt(row['created_at']),
+                        next_retry_at=self._parse_dt(row['next_retry_at']),
+                        retry_count=row['retry_count'] or 0,
+                        last_error=row['last_error'],
+                        status=TaskStatus(row['status']) if row['status'] else TaskStatus.DEFERRED
+                    )
+                    self._tasks_cache[key] = task
+                    return task
+            return None
+    
+    def delete_task(self, study_id: str, destination: str) -> bool:
+        """Delete a single task from cache and DB."""
+        self._ensure_cache()
+        key = f"{study_id}:{destination}"
+        
+        with self._lock:
+            if key in self._tasks_cache:
+                del self._tasks_cache[key]
+            self._db_delete(key)
+            return True
     
     def clear(self) -> int:
+        self._ensure_cache()
+        global db_manager
+        
         with self._lock:
-            count = len(self._tasks)
-            self._tasks.clear()
-            return count
+            self._tasks_cache.clear()
+            if db_manager:
+                return db_manager.clear_deferred_tasks()
+            return 0
     
     def get_stats(self) -> Dict[str, Any]:
-        with self._lock:
-            by_status = defaultdict(int)
-            for t in self._tasks.values():
-                by_status[t.status.value] += 1
+        self._ensure_cache()
+        global db_manager
+        
+        if db_manager:
+            stats = db_manager.get_deferred_stats()
             return {
-                'total_tasks': len(self._tasks),
-                'by_status': dict(by_status),
-                'max_capacity': Config.MAX_DEFERRED_TASKS
+                'total_tasks': stats['total'],
+                'by_status': stats['by_status'],
+                'max_capacity': Config.MAX_DEFERRED_TASKS,
+                'auto_remove': Config.DEFERRED_AUTO_REMOVE
             }
+        else:
+            with self._lock:
+                by_status = defaultdict(int)
+                for t in self._tasks_cache.values():
+                    by_status[t.status.value] += 1
+                return {
+                    'total_tasks': len(self._tasks_cache),
+                    'by_status': dict(by_status),
+                    'max_capacity': Config.MAX_DEFERRED_TASKS,
+                    'auto_remove': Config.DEFERRED_AUTO_REMOVE
+                }
     
     def start_worker(self):
         if self._worker and self._worker.is_alive():
@@ -2445,13 +2973,19 @@ def ConfigCallback(output, uri, **request):
             if isinstance(body, bytes):
                 body = body.decode('utf-8')
             updates = json.loads(body)
+            logger.info(f"Config update request: {list(updates.keys())}")
             changed = Config.update(updates)
+            if changed:
+                logger.info(f"Config updated: {changed}")
+            else:
+                logger.info("Config update: no changes detected")
             output.AnswerBuffer(json.dumps({
                 'success': True,
                 'message': f"Updated: {', '.join(changed)}" if changed else "No changes",
                 'changed': changed
             }).encode('utf-8'), 'application/json')
         except Exception as e:
+            logger.error(f"Config update error: {e}")
             output.SendHttpStatus(400, json.dumps({'success': False, 'error': str(e)}))
         return
     output.SendMethodNotAllowed('GET,POST')
@@ -2460,17 +2994,45 @@ def ConfigCallback(output, uri, **request):
 def LogsCallback(output, uri, **request):
     limit = 100
     level = None
-    groups = request.get('groups', [])
-    for g in groups:
-        if g.startswith('limit='):
+    
+    # Parse query parameters from URI (Orthanc passes full URI with query string)
+    try:
+        from urllib.parse import urlparse, parse_qs
+        parsed = urlparse(uri)
+        query_params = parse_qs(parsed.query)
+        
+        if 'limit' in query_params:
             try:
-                limit = int(g.split('=')[1])
+                limit = int(query_params['limit'][0])
             except:
                 pass
-        elif g.startswith('level='):
-            level = g.split('=')[1]
+        
+        if 'level' in query_params:
+            level = query_params['level'][0]
             if level == 'ALL':
                 level = None
+    except Exception as e:
+        logger.debug(f"LogsCallback parse error: {e}")
+        pass
+    
+    # Fallback: parse from groups (path segments) for older Orthanc versions
+    if level is None:
+        try:
+            if not parsed.query:
+                groups = request.get('groups', [])
+                for g in groups:
+                    if g.startswith('limit='):
+                        try:
+                            limit = int(g.split('=')[1])
+                        except:
+                            pass
+                    elif g.startswith('level='):
+                        level = g.split('=')[1]
+                        if level == 'ALL':
+                            level = None
+        except:
+            pass
+    
     logs = log_buffer.get_recent(limit, level)
     output.AnswerBuffer(json.dumps({'logs': logs, 'count': len(logs)}).encode('utf-8'), 'application/json')
 
@@ -2478,16 +3040,140 @@ def LogsCallback(output, uri, **request):
 def DeferredCallback(output, uri, **request):
     method = request.get('method', 'GET')
     if method == 'GET':
+        # Parse query parameters from URI for filtering
+        from urllib.parse import urlparse, parse_qs
+        parsed = urlparse(uri)
+        query_params = parse_qs(parsed.query)
+        
+        status_filter = query_params.get('status', [None])[0]
+        
+        all_tasks = deferred_queue.get_all()
+        if status_filter and status_filter != 'all':
+            all_tasks = [t for t in all_tasks if t.get('status') == status_filter]
+        
         output.AnswerBuffer(json.dumps({
-            'tasks': deferred_queue.get_all(),
+            'tasks': all_tasks,
             'stats': deferred_queue.get_stats()
         }, indent=2).encode('utf-8'), 'application/json')
         return
-    if method == 'DELETE':
-        count = deferred_queue.clear()
-        output.AnswerBuffer(json.dumps({'success': True, 'cleared': count}).encode('utf-8'), 'application/json')
+    
+    if method == 'POST':
+        try:
+            body = request.get('body', b'')
+            if isinstance(body, bytes):
+                body = body.decode('utf-8')
+            data = json.loads(body)
+            action = data.get('action', '').lower()
+            
+            if action == 'retry':
+                study_id = data.get('study_id')
+                destination = data.get('destination')
+                if not study_id or not destination:
+                    output.SendHttpStatus(400, json.dumps({'success': False, 'error': 'Missing study_id or destination'}))
+                    return
+                
+                task = deferred_queue.get_task(study_id, destination)
+                if task:
+                    task.status = TaskStatus.DEFERRED
+                    task.next_retry_at = datetime.utcnow()
+                    task.retry_count = 0
+                    deferred_queue._db_upsert(task)
+                    logger.info(f"Task manually retried: {study_id}:{destination}")
+                    output.AnswerBuffer(json.dumps({'success': True, 'message': f'Task {study_id}:{destination} scheduled for retry'}).encode('utf-8'), 'application/json')
+                else:
+                    output.SendHttpStatus(404, json.dumps({'success': False, 'error': 'Task not found'}))
+                return
+            
+            elif action == 'retry_all':
+                count = 0
+                for task_dict in deferred_queue.get_all():
+                    task = deferred_queue.get_task(task_dict['study_id'], task_dict['destination'])
+                    if task:
+                        task.status = TaskStatus.DEFERRED
+                        task.next_retry_at = datetime.utcnow()
+                        task.retry_count = 0
+                        deferred_queue._db_upsert(task)
+                        count += 1
+                logger.info(f"All tasks manually retried: {count}")
+                output.AnswerBuffer(json.dumps({'success': True, 'message': f'{count} tasks scheduled for retry', 'count': count}).encode('utf-8'), 'application/json')
+                return
+            
+            elif action == 'stop':
+                study_id = data.get('study_id')
+                destination = data.get('destination')
+                if not study_id or not destination:
+                    output.SendHttpStatus(400, json.dumps({'success': False, 'error': 'Missing study_id or destination'}))
+                    return
+                
+                task = deferred_queue.get_task(study_id, destination)
+                if task:
+                    task.status = TaskStatus.FAILED
+                    deferred_queue._db_upsert(task)
+                    logger.info(f"Task manually stopped: {study_id}:{destination}")
+                    output.AnswerBuffer(json.dumps({'success': True, 'message': f'Task {study_id}:{destination} stopped'}).encode('utf-8'), 'application/json')
+                else:
+                    output.SendHttpStatus(404, json.dumps({'success': False, 'error': 'Task not found'}))
+                return
+            
+            elif action == 'stop_all':
+                count = 0
+                for task_dict in deferred_queue.get_all():
+                    task = deferred_queue.get_task(task_dict['study_id'], task_dict['destination'])
+                    if task and task.status != TaskStatus.FAILED:
+                        task.status = TaskStatus.FAILED
+                        deferred_queue._db_upsert(task)
+                        count += 1
+                logger.info(f"All tasks manually stopped: {count}")
+                output.AnswerBuffer(json.dumps({'success': True, 'message': f'{count} tasks stopped', 'count': count}).encode('utf-8'), 'application/json')
+                return
+            
+            elif action == 'delete':
+                study_id = data.get('study_id')
+                destination = data.get('destination')
+                if not study_id or not destination:
+                    output.SendHttpStatus(400, json.dumps({'success': False, 'error': 'Missing study_id or destination'}))
+                    return
+                
+                task = deferred_queue.get_task(study_id, destination)
+                if task:
+                    deferred_queue.delete_task(study_id, destination)
+                    logger.info(f"Task deleted: {study_id}:{destination}")
+                    output.AnswerBuffer(json.dumps({'success': True, 'message': f'Task {study_id}:{destination} deleted'}).encode('utf-8'), 'application/json')
+                else:
+                    output.SendHttpStatus(404, json.dumps({'success': False, 'error': 'Task not found'}))
+                return
+            
+            else:
+                output.SendHttpStatus(400, json.dumps({'success': False, 'error': 'Invalid action'}))
+                return
+                
+        except Exception as e:
+            output.SendHttpStatus(400, json.dumps({'success': False, 'error': str(e)}))
         return
-    output.SendMethodNotAllowed('GET,DELETE')
+    
+    if method == 'DELETE':
+        try:
+            body = request.get('body', b'')
+            if isinstance(body, bytes):
+                body = body.decode('utf-8')
+            
+            if body:
+                data = json.loads(body)
+                study_id = data.get('study_id')
+                destination = data.get('destination')
+                if study_id and destination:
+                    deferred_queue.delete_task(study_id, destination)
+                    logger.info(f"Task deleted: {study_id}:{destination}")
+                    output.AnswerBuffer(json.dumps({'success': True, 'message': f'Task {study_id}:{destination} deleted'}).encode('utf-8'), 'application/json')
+                    return
+            
+            count = deferred_queue.clear()
+            output.AnswerBuffer(json.dumps({'success': True, 'cleared': count}).encode('utf-8'), 'application/json')
+        except Exception as e:
+            output.SendHttpStatus(400, json.dumps({'success': False, 'error': str(e)}))
+        return
+    
+    output.SendMethodNotAllowed('GET,POST,DELETE')
 
 
 def ControlCallback(output, uri, **request):
