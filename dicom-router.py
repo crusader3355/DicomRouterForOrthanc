@@ -396,6 +396,47 @@ class DatabaseManager:
                     ON deferred_tasks(next_retry_at)
                 ''')
                 
+                # DMIS send tasks table
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS dmis_send_tasks (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        orthanc_study_id TEXT NOT NULL,
+                        study_instance_uid TEXT,
+                        accession_number TEXT,
+                        patient_name TEXT,
+                        patient_sex TEXT,
+                        study_date TEXT,
+                        study_time TEXT,
+                        study_description TEXT,
+                        ohif_url TEXT,
+                        custom_tags TEXT,
+                        status TEXT DEFAULT 'pending',
+                        attempt_count INTEGER DEFAULT 0,
+                        max_attempts INTEGER DEFAULT 0,
+                        retry_timeout_sec INTEGER DEFAULT 300,
+                        next_retry_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        last_error TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        sent_at TIMESTAMP
+                    )
+                ''')
+                
+                cursor.execute('''
+                    CREATE INDEX IF NOT EXISTS idx_dmis_status 
+                    ON dmis_send_tasks(status)
+                ''')
+                
+                cursor.execute('''
+                    CREATE INDEX IF NOT EXISTS idx_dmis_retry 
+                    ON dmis_send_tasks(next_retry_at)
+                ''')
+                
+                cursor.execute('''
+                    CREATE INDEX IF NOT EXISTS idx_dmis_study 
+                    ON dmis_send_tasks(orthanc_study_id)
+                ''')
+                
                 conn.commit()
                 logger.info(f"Database initialized with WAL mode: {self.db_path}")
             finally:
@@ -806,6 +847,214 @@ class DatabaseManager:
             logger.error(f"DB get_deferred_stats error: {e}")
             return {'total': 0, 'by_status': {}}
     
+    # -------------------------------------------------------------------------
+    # DMIS SEND TASKS
+    # -------------------------------------------------------------------------
+    
+    def add_dmis_task(self, task: Dict[str, Any]) -> int:
+        """Insert a new DMIS send task. Returns task id."""
+        try:
+            with self._lock:
+                conn = sqlite3.connect(self.db_path)
+                try:
+                    cursor = conn.cursor()
+                    cursor.execute('''
+                        INSERT INTO dmis_send_tasks
+                        (orthanc_study_id, study_instance_uid, accession_number,
+                         patient_name, patient_sex, study_date, study_time, study_description,
+                         ohif_url, custom_tags, status, max_attempts, retry_timeout_sec, next_retry_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', (
+                        task.get('orthanc_study_id'),
+                        task.get('study_instance_uid'),
+                        task.get('accession_number'),
+                        task.get('patient_name'),
+                        task.get('patient_sex'),
+                        task.get('study_date'),
+                        task.get('study_time'),
+                        task.get('study_description'),
+                        task.get('ohif_url'),
+                        json.dumps(task.get('custom_tags', {})) if isinstance(task.get('custom_tags'), dict) else task.get('custom_tags', '{}'),
+                        task.get('status', 'pending'),
+                        task.get('max_attempts', 0),
+                        task.get('retry_timeout_sec', 300),
+                        task.get('next_retry_at', datetime.utcnow().isoformat())
+                    ))
+                    conn.commit()
+                    return cursor.lastrowid
+                finally:
+                    conn.close()
+        except Exception as e:
+            logger.error(f"DB add_dmis_task error: {e}")
+            return -1
+    
+    def get_dmis_task(self, task_id: int) -> Optional[Dict[str, Any]]:
+        """Get single DMIS task by id."""
+        try:
+            with self._lock:
+                conn = sqlite3.connect(self.db_path)
+                try:
+                    cursor = conn.cursor()
+                    cursor.execute('''
+                        SELECT id, orthanc_study_id, study_instance_uid, accession_number,
+                               patient_name, patient_sex, study_date, study_time, study_description,
+                               ohif_url, custom_tags, status, attempt_count, max_attempts,
+                               retry_timeout_sec, next_retry_at, last_error, created_at, updated_at, sent_at
+                        FROM dmis_send_tasks WHERE id = ?
+                    ''', (task_id,))
+                    row = cursor.fetchone()
+                    if row:
+                        return self._row_to_dmis_task(row)
+                    return None
+                finally:
+                    conn.close()
+        except Exception as e:
+            logger.error(f"DB get_dmis_task error: {e}")
+            return None
+    
+    def get_dmis_tasks(self, status: Optional[str] = None, limit: int = 1000, offset: int = 0) -> List[Dict[str, Any]]:
+        """Get DMIS tasks with optional status filter."""
+        try:
+            with self._lock:
+                conn = sqlite3.connect(self.db_path)
+                try:
+                    cursor = conn.cursor()
+                    if status and status != 'all':
+                        cursor.execute('''
+                            SELECT id, orthanc_study_id, study_instance_uid, accession_number,
+                                   patient_name, patient_sex, study_date, study_time, study_description,
+                                   ohif_url, custom_tags, status, attempt_count, max_attempts,
+                                   retry_timeout_sec, next_retry_at, last_error, created_at, updated_at, sent_at
+                            FROM dmis_send_tasks WHERE status = ? ORDER BY created_at DESC LIMIT ? OFFSET ?
+                        ''', (status, limit, offset))
+                    else:
+                        cursor.execute('''
+                            SELECT id, orthanc_study_id, study_instance_uid, accession_number,
+                                   patient_name, patient_sex, study_date, study_time, study_description,
+                                   ohif_url, custom_tags, status, attempt_count, max_attempts,
+                                   retry_timeout_sec, next_retry_at, last_error, created_at, updated_at, sent_at
+                            FROM dmis_send_tasks ORDER BY created_at DESC LIMIT ? OFFSET ?
+                        ''', (limit, offset))
+                    rows = cursor.fetchall()
+                    return [self._row_to_dmis_task(r) for r in rows]
+                finally:
+                    conn.close()
+        except Exception as e:
+            logger.error(f"DB get_dmis_tasks error: {e}")
+            return []
+    
+    def get_ready_dmis_tasks(self) -> List[Dict[str, Any]]:
+        """Get tasks ready for retry (status='pending' or 'error' and next_retry_at <= now)."""
+        try:
+            with self._lock:
+                conn = sqlite3.connect(self.db_path)
+                try:
+                    cursor = conn.cursor()
+                    cursor.execute('''
+                        SELECT id, orthanc_study_id, study_instance_uid, accession_number,
+                               patient_name, patient_sex, study_date, study_time, study_description,
+                               ohif_url, custom_tags, status, attempt_count, max_attempts,
+                               retry_timeout_sec, next_retry_at, last_error, created_at, updated_at, sent_at
+                        FROM dmis_send_tasks
+                        WHERE status IN ('pending', 'error') AND next_retry_at <= datetime('now')
+                        ORDER BY next_retry_at ASC
+                        LIMIT 50
+                    ''')
+                    rows = cursor.fetchall()
+                    # Mark as sending
+                    for r in rows:
+                        cursor.execute('''
+                            UPDATE dmis_send_tasks SET status = 'sending', updated_at = CURRENT_TIMESTAMP WHERE id = ?
+                        ''', (r[0],))
+                    conn.commit()
+                    return [self._row_to_dmis_task(r) for r in rows]
+                finally:
+                    conn.close()
+        except Exception as e:
+            logger.error(f"DB get_ready_dmis_tasks error: {e}")
+            return []
+    
+    def update_dmis_task(self, task_id: int, updates: Dict[str, Any]) -> bool:
+        """Update DMIS task fields."""
+        try:
+            allowed_fields = ['status', 'attempt_count', 'next_retry_at', 'last_error', 'sent_at']
+            fields = []
+            values = []
+            for k, v in updates.items():
+                if k in allowed_fields:
+                    fields.append(f"{k} = ?")
+                    values.append(v)
+            if not fields:
+                return False
+            fields.append("updated_at = CURRENT_TIMESTAMP")
+            values.append(task_id)
+            
+            with self._lock:
+                conn = sqlite3.connect(self.db_path)
+                try:
+                    cursor = conn.cursor()
+                    cursor.execute(f''
+                        UPDATE dmis_send_tasks SET {', '.join(fields)} WHERE id = ?
+                    '', tuple(values))
+                    conn.commit()
+                    return cursor.rowcount > 0
+                finally:
+                    conn.close()
+        except Exception as e:
+            logger.error(f"DB update_dmis_task error: {e}")
+            return False
+    
+    def get_dmis_stats(self) -> Dict[str, Any]:
+        """Get DMIS tasks statistics."""
+        try:
+            with self._lock:
+                conn = sqlite3.connect(self.db_path)
+                try:
+                    cursor = conn.cursor()
+                    cursor.execute('SELECT COUNT(*) FROM dmis_send_tasks')
+                    total = cursor.fetchone()[0]
+                    cursor.execute('''
+                        SELECT status, COUNT(*) FROM dmis_send_tasks GROUP BY status
+                    ''')
+                    by_status = {row[0] or 'unknown': row[1] for row in cursor.fetchall()}
+                    return {'total': total, 'by_status': by_status}
+                finally:
+                    conn.close()
+        except Exception as e:
+            logger.error(f"DB get_dmis_stats error: {e}")
+            return {'total': 0, 'by_status': {}}
+    
+    def _row_to_dmis_task(self, row) -> Dict[str, Any]:
+        """Convert DB row to DMIS task dict."""
+        custom_tags = {}
+        try:
+            if row[10]:
+                custom_tags = json.loads(row[10])
+        except:
+            pass
+        return {
+            'id': row[0],
+            'orthanc_study_id': row[1],
+            'study_instance_uid': row[2],
+            'accession_number': row[3],
+            'patient_name': row[4],
+            'patient_sex': row[5],
+            'study_date': row[6],
+            'study_time': row[7],
+            'study_description': row[8],
+            'ohif_url': row[9],
+            'custom_tags': custom_tags,
+            'status': row[11],
+            'attempt_count': row[12] or 0,
+            'max_attempts': row[13] or 0,
+            'retry_timeout_sec': row[14] or 300,
+            'next_retry_at': row[15],
+            'last_error': row[16],
+            'created_at': row[17],
+            'updated_at': row[18],
+            'sent_at': row[19],
+        }
+    
     def close(self):
         """Close database, flush remaining batch."""
         self._flush_batch()
@@ -872,6 +1121,16 @@ class Config:
     # Stable mode: 'study' - wait for complete study, 'series' - route per series
     STABLE_MODE: str = os.getenv('ORTHANC_STABLE_MODE', 'study').lower()
     
+    # DMIS Integration settings
+    DMIS_ENABLED: bool = os.getenv('DMIS_ENABLED', 'false').lower() == 'true'
+    DMIS_API_HOST: str = os.getenv('DMIS_API_HOST', '')
+    DMIS_API_TOKEN: str = os.getenv('DMIS_API_TOKEN', '')
+    DMIS_RETRY_TIMEOUT_SEC: int = int(os.getenv('DMIS_RETRY_TIMEOUT_SEC', '300'))
+    DMIS_RETRY_COUNT: int = int(os.getenv('DMIS_RETRY_COUNT', '0'))  # 0 = infinite
+    DMIS_DEFAULT_TAGS: str = os.getenv('DMIS_DEFAULT_TAGS', 'AccessionNumber,StudyInstanceUID,PatientName,PatientSex,StudyDate,StudyDescription')
+    DMIS_EXTRA_TAGS: str = os.getenv('DMIS_EXTRA_TAGS', 'PatientBirthDate,ReferringPhysicianName')
+    DMIS_OHIF_ROOT: str = os.getenv('DMIS_OHIF_ROOT', '/ohif/')
+    
     WATCH_FOLDER_ENABLED: bool = os.getenv('ORTHANC_WATCH_ENABLED', 'false').lower() == 'true'
     WATCH_FOLDER_PATH: str = os.getenv('ORTHANC_WATCH_PATH', r'C:\Orthanc\Incoming' if platform.system() == 'Windows' else '/var/lib/orthanc/incoming')
     WATCH_FOLDER_INTERVAL: int = int(os.getenv('ORTHANC_WATCH_INTERVAL', '5'))
@@ -917,6 +1176,13 @@ class Config:
                 'WATCH_FOLDER_MAX_DEPTH': cls.WATCH_FOLDER_MAX_DEPTH,
                 'DEFERRED_AUTO_REMOVE': cls.DEFERRED_AUTO_REMOVE,
                 'DEFERRED_KEEP_FAILED': cls.DEFERRED_KEEP_FAILED,
+                'DMIS_ENABLED': cls.DMIS_ENABLED,
+                'DMIS_API_HOST': cls.DMIS_API_HOST,
+                'DMIS_RETRY_TIMEOUT_SEC': cls.DMIS_RETRY_TIMEOUT_SEC,
+                'DMIS_RETRY_COUNT': cls.DMIS_RETRY_COUNT,
+                'DMIS_DEFAULT_TAGS': cls.DMIS_DEFAULT_TAGS,
+                'DMIS_EXTRA_TAGS': cls.DMIS_EXTRA_TAGS,
+                'DMIS_OHIF_ROOT': cls.DMIS_OHIF_ROOT,
             }
     
     @classmethod
@@ -2578,6 +2844,219 @@ connectivity_checker = ConnectivityChecker()
 
 
 # =============================================================================
+# DMIS SENDER
+# =============================================================================
+
+class DmisSender:
+    """Handles sending StableStudy notifications to DMIS API."""
+    
+    def __init__(self):
+        self._lock = threading.RLock()
+        self._worker: Optional[threading.Thread] = None
+        self._shutdown = threading.Event()
+    
+    def start_worker(self):
+        """Start background worker for DMIS retry tasks."""
+        if self._worker and self._worker.is_alive():
+            return
+        self._shutdown.clear()
+        self._worker = threading.Thread(target=self._worker_loop, daemon=True)
+        self._worker.start()
+        logger.info("DMIS Sender: worker started")
+    
+    def stop_worker(self):
+        """Stop background worker."""
+        self._shutdown.set()
+        if self._worker and self._worker.is_alive():
+            self._worker.join(timeout=10)
+        logger.info("DMIS Sender: worker stopped")
+    
+    def _worker_loop(self):
+        """Background loop: retry failed/pending DMIS tasks."""
+        while not self._shutdown.is_set():
+            try:
+                if Config.DMIS_ENABLED and Config.DMIS_API_HOST:
+                    self._process_ready_tasks()
+                self._shutdown.wait(min(Config.DMIS_RETRY_TIMEOUT_SEC, 60))
+            except Exception as e:
+                logger.error(f"DMIS Sender: worker error: {e}")
+                time.sleep(30)
+    
+    def _process_ready_tasks(self):
+        """Fetch and process ready DMIS tasks."""
+        global db_manager
+        if not db_manager:
+            return
+        
+        tasks = db_manager.get_ready_dmis_tasks()
+        if not tasks:
+            return
+        
+        for task in tasks:
+            if self._shutdown.is_set():
+                break
+            try:
+                self._send_to_dmis(task)
+            except Exception as e:
+                logger.error(f"DMIS Sender: task {task['id']} error: {e}")
+                self._handle_send_failure(task, str(e))
+    
+    def _send_to_dmis(self, task: Dict[str, Any]):
+        """Send study data to DMIS API."""
+        if not Config.DMIS_API_HOST:
+            logger.warning("DMIS Sender: API host not configured")
+            return
+        
+        payload = {
+            'ohifUrl': task.get('ohif_url'),
+            'accessionNumber': task.get('accession_number'),
+            'orthancStudyId': task.get('orthanc_study_id'),
+            'patientName': task.get('patient_name'),
+            'patientSex': task.get('patient_sex'),
+            'studyDate': task.get('study_date'),
+            'studyTime': task.get('study_time'),
+            'studyDescription': task.get('study_description'),
+            'customTags': task.get('custom_tags', {}),
+        }
+        
+        headers = {'Content-Type': 'application/json'}
+        if Config.DMIS_API_TOKEN:
+            headers['Authorization'] = f'Bearer {Config.DMIS_API_TOKEN}'
+        
+        try:
+            import urllib.request
+            import urllib.error
+            
+            req = urllib.request.Request(
+                Config.DMIS_API_HOST,
+                data=json.dumps(payload).encode('utf-8'),
+                headers=headers,
+                method='POST'
+            )
+            
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                if resp.status in (200, 201, 202):
+                    logger.info(f"DMIS Sender: task {task['id']} sent successfully")
+                    self._mark_success(task)
+                else:
+                    raise Exception(f"HTTP {resp.status}")
+                    
+        except urllib.error.HTTPError as e:
+            raise Exception(f"HTTP {e.code}: {e.reason}")
+        except urllib.error.URLError as e:
+            raise Exception(f"URL error: {e.reason}")
+        except Exception as e:
+            raise Exception(f"Send error: {e}")
+    
+    def _mark_success(self, task: Dict[str, Any]):
+        """Mark task as successfully sent."""
+        global db_manager
+        if db_manager:
+            db_manager.update_dmis_task(task['id'], {
+                'status': 'success',
+                'attempt_count': task.get('attempt_count', 0) + 1,
+                'sent_at': datetime.utcnow().isoformat(),
+                'last_error': None
+            })
+        metrics.increment('dmis_sent_success')
+    
+    def _handle_send_failure(self, task: Dict[str, Any], error: str):
+        """Handle send failure with retry logic."""
+        global db_manager
+        if not db_manager:
+            return
+        
+        attempt_count = task.get('attempt_count', 0) + 1
+        max_attempts = task.get('max_attempts', Config.DMIS_RETRY_COUNT)
+        
+        # If max_attempts == 0, retry infinitely
+        if max_attempts > 0 and attempt_count >= max_attempts:
+            logger.error(f"DMIS Sender: task {task['id']} failed permanently after {attempt_count} attempts")
+            db_manager.update_dmis_task(task['id'], {
+                'status': 'error',
+                'attempt_count': attempt_count,
+                'last_error': error
+            })
+            metrics.increment('dmis_sent_failed')
+        else:
+            next_retry = datetime.utcnow() + timedelta(seconds=task.get('retry_timeout_sec', Config.DMIS_RETRY_TIMEOUT_SEC))
+            logger.warning(f"DMIS Sender: task {task['id']} failed (attempt {attempt_count}), retry at {next_retry.isoformat()}")
+            db_manager.update_dmis_task(task['id'], {
+                'status': 'pending',
+                'attempt_count': attempt_count,
+                'next_retry_at': next_retry.isoformat(),
+                'last_error': error
+            })
+            metrics.increment('dmis_sent_retry')
+    
+    def create_task_from_study(self, orthanc_study_id: str, study_data: Dict[str, Any]):
+        """Create DMIS send task from study data."""
+        global db_manager
+        if not db_manager or not Config.DMIS_ENABLED or not Config.DMIS_API_HOST:
+            return
+        
+        try:
+            main_tags = study_data.get('MainDicomTags', {})
+            patient_tags = study_data.get('PatientMainDicomTags', {})
+            requested_tags = study_data.get('RequestedTags', {})
+            
+            study_instance_uid = main_tags.get('StudyInstanceUID', '')
+            accession_number = main_tags.get('AccessionNumber', '')
+            
+            if not study_instance_uid:
+                logger.warning(f"DMIS Sender: study {orthanc_study_id} has no StudyInstanceUID, skipping")
+                return
+            
+            # Build OHIF URL
+            ohif_url = f"{Config.ORTHANC_URL.rstrip('/')}{Config.DMIS_OHIF_ROOT}viewer?StudyInstanceUIDs={study_instance_uid}"
+            
+            # Build custom tags from extra tags
+            custom_tags = {}
+            extra_tags = [t.strip() for t in Config.DMIS_EXTRA_TAGS.split(',') if t.strip()]
+            all_tags = {**main_tags, **patient_tags, **requested_tags}
+            for tag in extra_tags:
+                if tag in all_tags:
+                    custom_tags[tag] = all_tags[tag]
+            
+            task = {
+                'orthanc_study_id': orthanc_study_id,
+                'study_instance_uid': study_instance_uid,
+                'accession_number': accession_number,
+                'patient_name': patient_tags.get('PatientName', ''),
+                'patient_sex': patient_tags.get('PatientSex', ''),
+                'study_date': main_tags.get('StudyDate', ''),
+                'study_time': main_tags.get('StudyTime', ''),
+                'study_description': main_tags.get('StudyDescription', ''),
+                'ohif_url': ohif_url,
+                'custom_tags': custom_tags,
+                'status': 'pending',
+                'max_attempts': Config.DMIS_RETRY_COUNT,
+                'retry_timeout_sec': Config.DMIS_RETRY_TIMEOUT_SEC,
+                'next_retry_at': datetime.utcnow().isoformat(),
+            }
+            
+            task_id = db_manager.add_dmis_task(task)
+            if task_id > 0:
+                logger.info(f"DMIS Sender: created task {task_id} for study {orthanc_study_id[:20]}...")
+                metrics.increment('dmis_tasks_created')
+                
+                # Try immediate send
+                try:
+                    created_task = db_manager.get_dmis_task(task_id)
+                    if created_task:
+                        self._send_to_dmis(created_task)
+                except Exception as e:
+                    logger.warning(f"DMIS Sender: immediate send failed for task {task_id}: {e}")
+                    self._handle_send_failure(created_task or task, str(e))
+            
+        except Exception as e:
+            logger.error(f"DMIS Sender: create task error: {e}")
+
+
+dmis_sender = DmisSender()
+
+
+# =============================================================================
 # STUDY PROCESSING
 # =============================================================================
 
@@ -2721,6 +3200,13 @@ def process_study(resource_id: str):
             except Exception as e:
                 logger.error(f"Forward failed to {dest}: {str(e)[:100]}")
                 deferred_queue.add(resource_id, dest, str(e), patient_name, modality_str)
+        
+        # DMIS Integration: send stable study notification
+        if Config.DMIS_ENABLED:
+            try:
+                dmis_sender.create_task_from_study(resource_id, study)
+            except Exception as e:
+                logger.error(f"DMIS Sender: error creating task for {resource_id[:20]}: {e}")
     
     except Exception as e:
         logger.error(f"Error processing study {resource_id[:20]}: {e}")
@@ -2907,6 +3393,10 @@ def HealthCallback(output, uri, **request):
     except:
         pass
     
+    dmis_stats = {'enabled': Config.DMIS_ENABLED}
+    if Config.DMIS_ENABLED and db_manager:
+        dmis_stats.update(db_manager.get_dmis_stats())
+    
     response = {
         'status': 'healthy' if db_status == 'ok' and disk_ok else 'degraded',
         'checks': {
@@ -2926,6 +3416,7 @@ def HealthCallback(output, uri, **request):
         'deferred': deferred_queue.get_stats(),
         'processing': study_queue.get_stats(),
         'watchfolder': watch_folder_manager.get_status() if watch_folder_manager else {'enabled': False},
+        'dmis': dmis_stats,
         'metrics': metrics.get_stats()
     }
     output.AnswerBuffer(json.dumps(response, indent=2).encode('utf-8'), 'application/json')
@@ -3277,6 +3768,236 @@ def WatchFolderLogsCallback(output, uri, **request):
 
 
 # =============================================================================
+# DMIS REST API CALLBACKS
+# =============================================================================
+
+def DmisTasksCallback(output, uri, **request):
+    """Handle DMIS tasks: GET list, POST retry."""
+    global db_manager
+    method = request.get('method', 'GET')
+    
+    if method == 'GET':
+        try:
+            from urllib.parse import urlparse, parse_qs
+            parsed = urlparse(uri)
+            query_params = parse_qs(parsed.query)
+            
+            status_filter = query_params.get('status', [None])[0]
+            limit = int(query_params.get('limit', ['1000'])[0] or 1000)
+            offset = int(query_params.get('offset', ['0'])[0] or 0)
+            
+            if db_manager:
+                tasks = db_manager.get_dmis_tasks(status=status_filter, limit=limit, offset=offset)
+                stats = db_manager.get_dmis_stats()
+            else:
+                tasks = []
+                stats = {'total': 0, 'by_status': {}}
+            
+            output.AnswerBuffer(json.dumps({
+                'tasks': tasks,
+                'stats': stats
+            }, indent=2).encode('utf-8'), 'application/json')
+        except Exception as e:
+            output.SendHttpStatus(500, json.dumps({'success': False, 'error': str(e)}))
+        return
+    
+    if method == 'POST':
+        try:
+            body = request.get('body', b'')
+            if isinstance(body, bytes):
+                body = body.decode('utf-8')
+            data = json.loads(body)
+            action = data.get('action', '').lower()
+            
+            if action == 'retry':
+                task_id = data.get('task_id')
+                if not task_id:
+                    output.SendHttpStatus(400, json.dumps({'success': False, 'error': 'Missing task_id'}))
+                    return
+                
+                if db_manager:
+                    task = db_manager.get_dmis_task(int(task_id))
+                    if task:
+                        db_manager.update_dmis_task(task['id'], {
+                            'status': 'pending',
+                            'attempt_count': 0,
+                            'next_retry_at': datetime.utcnow().isoformat(),
+                            'last_error': None
+                        })
+                        logger.info(f"DMIS task {task_id} manually retried")
+                        output.AnswerBuffer(json.dumps({'success': True, 'message': f'Task {task_id} scheduled for retry'}).encode('utf-8'), 'application/json')
+                    else:
+                        output.SendHttpStatus(404, json.dumps({'success': False, 'error': 'Task not found'}))
+                else:
+                    output.SendHttpStatus(503, json.dumps({'success': False, 'error': 'Database not available'}))
+                return
+            
+            elif action == 'retry_all':
+                if db_manager:
+                    tasks = db_manager.get_dmis_tasks(status='error')
+                    count = 0
+                    for task in tasks:
+                        db_manager.update_dmis_task(task['id'], {
+                            'status': 'pending',
+                            'attempt_count': 0,
+                            'next_retry_at': datetime.utcnow().isoformat(),
+                            'last_error': None
+                        })
+                        count += 1
+                    logger.info(f"All {count} failed DMIS tasks manually retried")
+                    output.AnswerBuffer(json.dumps({'success': True, 'message': f'{count} tasks scheduled for retry', 'count': count}).encode('utf-8'), 'application/json')
+                else:
+                    output.SendHttpStatus(503, json.dumps({'success': False, 'error': 'Database not available'}))
+                return
+            
+            else:
+                output.SendHttpStatus(400, json.dumps({'success': False, 'error': 'Invalid action'}))
+                return
+                
+        except Exception as e:
+            output.SendHttpStatus(400, json.dumps({'success': False, 'error': str(e)}))
+        return
+    
+    output.SendMethodNotAllowed('GET,POST')
+
+
+def DmisConfigCallback(output, uri, **request):
+    """Handle DMIS configuration: GET/POST."""
+    method = request.get('method', 'GET')
+    
+    if method == 'GET':
+        response = {
+            'enabled': Config.DMIS_ENABLED,
+            'api_host': Config.DMIS_API_HOST,
+            'retry_timeout_sec': Config.DMIS_RETRY_TIMEOUT_SEC,
+            'retry_count': Config.DMIS_RETRY_COUNT,
+            'default_tags': Config.DMIS_DEFAULT_TAGS,
+            'extra_tags': Config.DMIS_EXTRA_TAGS,
+            'ohif_root': Config.DMIS_OHIF_ROOT,
+        }
+        # Mask token
+        response['api_token_set'] = bool(Config.DMIS_API_TOKEN)
+        output.AnswerBuffer(json.dumps(response, indent=2).encode('utf-8'), 'application/json')
+        return
+    
+    if method == 'POST':
+        try:
+            body = request.get('body', b'')
+            if isinstance(body, bytes):
+                body = body.decode('utf-8')
+            data = json.loads(body)
+            
+            changed = []
+            with Config._lock:
+                if 'enabled' in data:
+                    Config.DMIS_ENABLED = bool(data['enabled'])
+                    changed.append('DMIS_ENABLED')
+                if 'api_host' in data:
+                    Config.DMIS_API_HOST = str(data['api_host'])
+                    changed.append('DMIS_API_HOST')
+                if 'api_token' in data and data['api_token']:
+                    Config.DMIS_API_TOKEN = str(data['api_token'])
+                    changed.append('DMIS_API_TOKEN')
+                if 'retry_timeout_sec' in data:
+                    Config.DMIS_RETRY_TIMEOUT_SEC = int(data['retry_timeout_sec'])
+                    changed.append('DMIS_RETRY_TIMEOUT_SEC')
+                if 'retry_count' in data:
+                    Config.DMIS_RETRY_COUNT = int(data['retry_count'])
+                    changed.append('DMIS_RETRY_COUNT')
+                if 'default_tags' in data:
+                    Config.DMIS_DEFAULT_TAGS = str(data['default_tags'])
+                    changed.append('DMIS_DEFAULT_TAGS')
+                if 'extra_tags' in data:
+                    Config.DMIS_EXTRA_TAGS = str(data['extra_tags'])
+                    changed.append('DMIS_EXTRA_TAGS')
+                if 'ohif_root' in data:
+                    Config.DMIS_OHIF_ROOT = str(data['ohif_root'])
+                    changed.append('DMIS_OHIF_ROOT')
+                
+                # Persist to DB
+                if db_manager and changed:
+                    for key in changed:
+                        db_manager.set_setting(key, getattr(Config, key))
+            
+            output.AnswerBuffer(json.dumps({
+                'success': True,
+                'message': f"Updated: {', '.join(changed)}" if changed else "No changes",
+                'changed': changed
+            }).encode('utf-8'), 'application/json')
+        except Exception as e:
+            output.SendHttpStatus(400, json.dumps({'success': False, 'error': str(e)}))
+        return
+    
+    output.SendMethodNotAllowed('GET,POST')
+
+
+def DmisSendDirectCallback(output, uri, **request):
+    """Handle direct send-to-station requests from DMIS backend."""
+    if request.get('method') != 'POST':
+        output.SendMethodNotAllowed('POST')
+        return
+    
+    try:
+        body = request.get('body', b'')
+        if isinstance(body, bytes):
+            body = body.decode('utf-8')
+        data = json.loads(body)
+        
+        orthanc_study_id = data.get('orthancStudyId')
+        modality_id = data.get('modalityId')
+        source = data.get('source', 'dmis_direct_send')
+        user_id = data.get('userId', '')
+        priority = data.get('priority', 0)
+        
+        if not orthanc_study_id or not modality_id:
+            output.SendHttpStatus(400, json.dumps({'success': False, 'error': 'Missing orthancStudyId or modalityId'}))
+            return
+        
+        # Validate modality exists
+        try:
+            modalities_resp = orthanc.RestApiGet('/modalities')
+            modalities = safe_json_loads(modalities_resp, [])
+            if isinstance(modalities, dict):
+                modalities = list(modalities.keys())
+            if modality_id not in modalities:
+                output.SendHttpStatus(400, json.dumps({'success': False, 'error': f'Modality {modality_id} not found'}))
+                return
+        except Exception as e:
+            logger.warning(f"DMIS Direct Send: cannot validate modality: {e}")
+        
+        # Create async store job via Orthanc
+        payload = json.dumps({
+            "Asynchronous": True,
+            "Compress": Config.COMPRESS,
+            "Permissive": True,
+            "Resources": [orthanc_study_id],
+            "Synchronous": False,
+            "MoveOriginatorAet": Config.MOVE_ORIGINATOR_AET,
+            "MoveOriginatorID": Config.MOVE_ORIGINATOR_ID,
+            "StorageCommitment": Config.STORAGE_COMMITMENT
+        })
+        
+        job_resp = orthanc.RestApiPost(f'/modalities/{modality_id}/store', payload)
+        job_result = safe_json_loads(job_resp, {})
+        job_id = job_result.get('ID') if isinstance(job_result, dict) else None
+        
+        logger.info(f"DMIS Direct Send: created store job for {orthanc_study_id[:20]}... to {modality_id}, job={job_id}")
+        metrics.increment('dmis_direct_sends')
+        
+        output.AnswerBuffer(json.dumps({
+            'success': True,
+            'taskId': job_id or f"direct-{orthanc_study_id}-{modality_id}",
+            'status': 'queued',
+            'modalityId': modality_id,
+            'orthancStudyId': orthanc_study_id
+        }).encode('utf-8'), 'application/json')
+        
+    except Exception as e:
+        logger.error(f"DMIS Direct Send error: {e}")
+        output.SendHttpStatus(500, json.dumps({'success': False, 'error': str(e)}))
+
+
+# =============================================================================
 # SIGNAL HANDLERS (GRACEFUL SHUTDOWN)
 # =============================================================================
 
@@ -3319,6 +4040,7 @@ def cleanup():
     try:
         study_queue.stop_workers()
         deferred_queue.stop_worker()
+        dmis_sender.stop_worker()
         if watch_folder_manager:
             watch_folder_manager.stop()
         rules_manager.save_to_file(Config.RULES_FILE_PATH)
@@ -3369,6 +4091,7 @@ def initialize():
     
     study_queue.start_workers()
     deferred_queue.start_worker()
+    dmis_sender.start_worker()
     
     watch_folder_manager = WatchFolderManager()
     
@@ -3382,6 +4105,10 @@ def initialize():
     
     logger.info(f"Loaded {len(rules_manager.rules)} rules")
     logger.info(f"Circuit Breaker: threshold={circuit_breaker.failure_threshold}, recovery={circuit_breaker.recovery_timeout}s")
+    if Config.DMIS_ENABLED:
+        logger.info(f"DMIS Integration: enabled, API={Config.DMIS_API_HOST}, retry={Config.DMIS_RETRY_TIMEOUT_SEC}s, max_attempts={'infinite' if Config.DMIS_RETRY_COUNT == 0 else Config.DMIS_RETRY_COUNT}")
+    else:
+        logger.info("DMIS Integration: disabled")
     logger.info("=" * 70)
     logger.info("Web UI: http://localhost:8042/dicom-router/")
     logger.info("=" * 70)
@@ -3404,5 +4131,9 @@ orthanc.RegisterRestCallback('/dicom-router/control', ControlCallback)
 orthanc.RegisterRestCallback('/dicom-router/watchfolder', WatchFolderCallback)
 orthanc.RegisterRestCallback('/dicom-router/watchfolder/scan', WatchFolderScanCallback)
 orthanc.RegisterRestCallback('/dicom-router/watchfolder/logs', WatchFolderLogsCallback)
+
+orthanc.RegisterRestCallback('/dicom-router/dmis/tasks', DmisTasksCallback)
+orthanc.RegisterRestCallback('/dicom-router/dmis/config', DmisConfigCallback)
+orthanc.RegisterRestCallback('/dicom-router/dmis/send', DmisSendDirectCallback)
 
 initialize()
