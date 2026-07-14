@@ -927,6 +927,21 @@
                             <div style="margin-bottom: 1rem;">
                                 <label class="form-label-oe2">File Extensions (comma separated)</label>
                                 <input type="text" id="wf_extensions" class="form-control-oe2" value=".dcm,.bin" placeholder=".dcm,.bin">
+                                <div class="info-hint">Use "." (dot) to explicitly mean "files without extension"</div>
+                            </div>
+                            
+                            <div style="margin-bottom: 1.5rem;">
+                                <label class="form-switch-oe2">
+                                    <input type="checkbox" id="wf_parse_no_extension">
+                                    <span>Parse files without extension</span>
+                                </label>
+                                <div class="info-hint">When enabled, files with no extension are also imported as DICOM</div>
+                            </div>
+                            
+                            <div style="margin-bottom: 1rem;">
+                                <label class="form-label-oe2">Batch Size</label>
+                                <input type="number" id="wf_batch_size" class="form-control-oe2" value="100" min="1" max="1000">
+                                <div class="info-hint">Number of files processed per batch interval (large queues are split)</div>
                             </div>
                         </div>
                     </div>
@@ -1373,6 +1388,8 @@
                 document.getElementById('wf_min_age').value = d.min_file_age || 60;
                 document.getElementById('wf_max_depth').value = d.max_depth || 5;
                 document.getElementById('wf_extensions').value = d.extensions ? d.extensions.join(',') : '.dcm';
+                document.getElementById('wf_parse_no_extension').checked = d.parse_no_extension === true;
+                document.getElementById('wf_batch_size').value = d.batch_size || 100;
                 document.getElementById('wf_delete_originals').checked = d.delete_originals !== false;
                 document.getElementById('wf_cleanup').checked = d.cleanup_enabled || false;
                 document.getElementById('wf_cleanup_interval').value = d.cleanup_interval || 600;
@@ -1408,6 +1425,8 @@
 				WATCH_FOLDER_MIN_FILE_AGE: parseInt(document.getElementById('wf_min_age').value),
 				WATCH_FOLDER_MAX_DEPTH: parseInt(document.getElementById('wf_max_depth').value),
 				WATCH_FOLDER_EXTENSIONS: document.getElementById('wf_extensions').value,
+				WATCH_FOLDER_PARSE_NO_EXTENSION: document.getElementById('wf_parse_no_extension').checked,
+				WATCH_FOLDER_BATCH_SIZE: parseInt(document.getElementById('wf_batch_size').value),
 				WATCH_FOLDER_CLEANUP_ENABLED: document.getElementById('wf_cleanup').checked,
 				WATCH_FOLDER_CLEANUP_INTERVAL: parseInt(document.getElementById('wf_cleanup_interval').value),
 				WATCH_FOLDER_DELETE_ORIGINALS: document.getElementById('wf_delete_originals').checked

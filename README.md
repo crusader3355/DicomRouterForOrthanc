@@ -9,7 +9,7 @@
 
 Python-приложение для интеллектуальной маршрутизации медицинских DICOM-файлов (МРТ, КТ, рентген, УЗИ) между PACS-серверами, рабочими станциями и архивами. Поддерживает гибкие правила маршрутизации на основе модальности, DICOM-тегов и AET источника.
 
-![Version](https://img.shields.io/badge/Version-3.5.0-blue.svg)
+![Version](https://img.shields.io/badge/Version-3.6.0-blue.svg)
 
 ---
 
@@ -58,6 +58,7 @@ Python-приложение для интеллектуальной маршру
 - Мониторинг статуса и статистики
 - Real-time логи
 - Управление Circuit Breaker
+- **Watch Folder** — рекурсивное сканирование входящих DICOM, поддержка файлов без расширения, батчинг больших очередей
 
 ---
 
@@ -89,7 +90,7 @@ Python-приложение для интеллектуальной маршру
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                              DICOM Router v3.5.0                            │
+│                              DICOM Router v3.6.0                            │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
 │  ┌──────────────┐     ┌──────────────┐     ┌─────────────────────────────┐  │
@@ -187,7 +188,10 @@ python dicom-router.py
 | `ORTHANC_PASSWORD` | Пароль Orthanc | - |
 | `WATCH_FOLDER_PATH` | Путь к watch folder | - |
 | `WATCH_FOLDER_INTERVAL` | Интервал сканирования (сек) | `30` |
-| `WATCH_FOLDER_EXTENSIONS` | Расширения файлов | `.dcm,.bin` |
+| `WATCH_FOLDER_EXTENSIONS` | Расширения файлов (через запятую, `.` означает «без расширения») | `.dcm,.bin` |
+| `WATCH_FOLDER_PARSE_NO_EXTENSION` | Импортировать файлы без расширения как DICOM | `false` |
+| `WATCH_FOLDER_BATCH_SIZE` | Количество файлов, обрабатываемых за один батч | `100` |
+| `WATCH_FOLDER_BATCH_INTERVAL` | Интервал между батчами (сек) | `30` |
 | `WATCH_FOLDER_DELETE_ORIGINALS` | Удалять исходники | `true` |
 | `ORTHANC_LOG_LEVEL` | Уровень логирования | `INFO` |
 | `ORTHANC_DEFERRED_AUTO_REMOVE` | Автоудаление отложенных задач после исчерпания попыток | `true` |
@@ -219,6 +223,8 @@ set ORTHANC_PASSWORD=your_password
 set WATCH_FOLDER_PATH=E:\topacs
 set WATCH_FOLDER_INTERVAL=30
 set WATCH_FOLDER_EXTENSIONS=.dcm,.bin
+set WATCH_FOLDER_PARSE_NO_EXTENSION=true
+set WATCH_FOLDER_BATCH_SIZE=100
 set WATCH_FOLDER_DELETE_ORIGINALS=true
 
 set ORTHANC_LOG_LEVEL=INFO

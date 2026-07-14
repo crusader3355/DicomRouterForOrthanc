@@ -993,9 +993,10 @@ class DatabaseManager:
                 conn = sqlite3.connect(self.db_path)
                 try:
                     cursor = conn.cursor()
-                    cursor.execute(f''
-                        UPDATE dmis_send_tasks SET {', '.join(fields)} WHERE id = ?
-                    '', tuple(values))
+                    cursor.execute(
+                        f"UPDATE dmis_send_tasks SET {', '.join(fields)} WHERE id = ?",
+                        tuple(values)
+                    )
                     conn.commit()
                     return cursor.rowcount > 0
                 finally:
@@ -1141,8 +1142,10 @@ class Config:
     WATCH_FOLDER_DB_PATH: str = os.path.join(DATA_DIR, 'watchfolder-db.json')
     
     WATCH_FOLDER_BATCH_INTERVAL: int = int(os.getenv('ORTHANC_WATCH_BATCH_INTERVAL', '30'))
+    WATCH_FOLDER_BATCH_SIZE: int = int(os.getenv('ORTHANC_WATCH_BATCH_SIZE', '100'))
     WATCH_FOLDER_MIN_FILE_AGE: int = int(os.getenv('ORTHANC_WATCH_MIN_FILE_AGE', '60'))
     WATCH_FOLDER_MAX_DEPTH: int = int(os.getenv('ORTHANC_WATCH_MAX_DEPTH', '5'))
+    WATCH_FOLDER_PARSE_NO_EXTENSION: bool = os.getenv('ORTHANC_WATCH_PARSE_NO_EXTENSION', 'false').lower() == 'true'
     WATCH_FOLDER_STAGING_PATH: str = os.getenv('ORTHANC_WATCH_STAGING', os.path.join(DATA_DIR, 'watch_staging'))
     
     @classmethod
@@ -1172,8 +1175,10 @@ class Config:
                 'WATCH_FOLDER_CLEANUP_INTERVAL': cls.WATCH_FOLDER_CLEANUP_INTERVAL,
                 'WATCH_FOLDER_DELETE_ORIGINALS': cls.WATCH_FOLDER_DELETE_ORIGINALS,
                 'WATCH_FOLDER_BATCH_INTERVAL': cls.WATCH_FOLDER_BATCH_INTERVAL,
+                'WATCH_FOLDER_BATCH_SIZE': cls.WATCH_FOLDER_BATCH_SIZE,
                 'WATCH_FOLDER_MIN_FILE_AGE': cls.WATCH_FOLDER_MIN_FILE_AGE,
                 'WATCH_FOLDER_MAX_DEPTH': cls.WATCH_FOLDER_MAX_DEPTH,
+                'WATCH_FOLDER_PARSE_NO_EXTENSION': cls.WATCH_FOLDER_PARSE_NO_EXTENSION,
                 'DEFERRED_AUTO_REMOVE': cls.DEFERRED_AUTO_REMOVE,
                 'DEFERRED_KEEP_FAILED': cls.DEFERRED_KEEP_FAILED,
                 'DMIS_ENABLED': cls.DMIS_ENABLED,
@@ -1565,6 +1570,44 @@ class WatchFolderManager(threading.Thread):
                     exts.append(x.upper())
         return exts
     
+    def _matches_extension_filter(self, filename: str) -> bool:
+        """Return True if filename passes the extension filter.
+        
+        Files without extension are accepted when WATCH_FOLDER_PARSE_NO_EXTENSION is True.
+        An empty extension list means accept all files.
+        """
+        extensions = self._get_extensions()
+        if not extensions:
+            return True
+        
+        file_ext = Path(filename).suffix
+        if file_ext:
+            # Use case-insensitive comparison; _get_extensions already includes both cases on Windows
+            return file_ext.lower() in {e.lower() for e in extensions}
+        
+        return Config.WATCH_FOLDER_PARSE_NO_EXTENSION
+    
+    def _is_file_ready_fast(self, filepath: str) -> bool:
+        """Lightweight readiness check used during scanning.
+        
+        Avoids the 0.2s size-stability sleep; full stability check is done right before import.
+        """
+        try:
+            if not os.path.exists(filepath):
+                return False
+            
+            stat = os.stat(filepath)
+            if stat.st_size == 0:
+                return False
+            
+            file_age = time.time() - stat.st_mtime
+            if file_age < Config.WATCH_FOLDER_MIN_FILE_AGE:
+                return False
+            
+            return True
+        except Exception:
+            return False
+    
     def _is_file_ready(self, filepath: str) -> bool:
         filename = os.path.basename(filepath)
         
@@ -1603,6 +1646,7 @@ class WatchFolderManager(threading.Thread):
     def scan_folder(self):
         start_time = time.time()
         found_count = 0
+        skipped_count = 0
         scanned_dirs = 0
         
         try:
@@ -1612,6 +1656,9 @@ class WatchFolderManager(threading.Thread):
                 return
             
             for root, dirs, files in os.walk(folder):
+                if self._shutdown.is_set():
+                    break
+                
                 try:
                     depth = root.count(os.sep) - folder.count(os.sep)
                 except:
@@ -1632,9 +1679,8 @@ class WatchFolderManager(threading.Thread):
                     
                     filepath = os.path.join(root, filename)
                     
-                    extensions = self._get_extensions()
-                    file_ext = Path(filename).suffix
-                    if extensions and file_ext not in extensions:
+                    if not self._matches_extension_filter(filename):
+                        skipped_count += 1
                         continue
                     
                     file_hash = self._get_file_hash(filepath)
@@ -1652,7 +1698,8 @@ class WatchFolderManager(threading.Thread):
                         if filepath in self._pending_files:
                             continue
                     
-                    if self._is_file_ready(filepath):
+                    # Fast readiness check only; full stability check happens at import time.
+                    if self._is_file_ready_fast(filepath):
                         with self._batch_lock:
                             self._pending_files.add(filepath)
                             found_count += 1
@@ -1661,30 +1708,47 @@ class WatchFolderManager(threading.Thread):
             logger.error(f"Watch Folder: scan error: {e}")
         
         self._last_scan = datetime.utcnow()
+        elapsed = time.time() - start_time
         
-        if found_count > 0:
-            logger.info(f"Watch Folder: scan complete - {found_count} new files queued")
+        if found_count > 0 or skipped_count > 0:
+            logger.info(f"Watch Folder: scan complete in {elapsed:.2f}s - {found_count} new files queued, {skipped_count} skipped by extension filter")
     
     def process_batch(self):
         with self._batch_lock:
-            files_to_process = list(self._pending_files)
-            self._pending_files.clear()
+            pending_list = list(self._pending_files)
         
-        if not files_to_process:
+        if not pending_list:
             return
         
-        batch_size = len(files_to_process)
-        logger.info(f"Watch Folder: processing batch of {batch_size} files")
-        metrics.add_watch_folder_log('BATCH_START', f"Size: {batch_size}", "Processing")
+        batch_size = Config.WATCH_FOLDER_BATCH_SIZE
+        files_to_process = pending_list[:batch_size]
+        remaining = pending_list[batch_size:]
+        
+        # Remove the files we are about to process from the pending set.
+        with self._batch_lock:
+            for f in files_to_process:
+                self._pending_files.discard(f)
+            # Keep anything past the batch size for later.
+            self._pending_files.update(remaining)
+        
+        logger.info(f"Watch Folder: processing batch of {len(files_to_process)} files (remaining in queue: {len(remaining)})")
+        metrics.add_watch_folder_log('BATCH_START', f"Size: {len(files_to_process)}, remaining: {len(remaining)}", "Processing")
         
         success_count = 0
         fail_count = 0
+        not_ready = []
         
-        for filepath in files_to_process:
+        for idx, filepath in enumerate(files_to_process):
             if self._shutdown.is_set():
+                # Re-queue unprocessed files so they survive a graceful stop.
                 with self._batch_lock:
-                    self._pending_files.update(files_to_process[files_to_process.index(filepath):])
+                    self._pending_files.update(files_to_process[idx:])
                 break
+            
+            # Full readiness check right before import. If file is still being written, put it back.
+            if not self._is_file_ready(filepath):
+                not_ready.append(filepath)
+                continue
             
             try:
                 if self._process_single_file(filepath):
@@ -1695,10 +1759,16 @@ class WatchFolderManager(threading.Thread):
                 logger.error(f"Watch Folder: failed to process {filepath}: {e}")
                 fail_count += 1
             
+            # Small yield to keep the router responsive with large queues.
             time.sleep(0.01)
         
-        metrics.add_watch_folder_log('BATCH_COMPLETE', f"Success: {success_count}, Failed: {fail_count}", "Complete")
-        logger.info(f"Watch Folder: batch complete - OK:{success_count}, Failed:{fail_count}")
+        # Re-queue files that were not ready yet.
+        if not_ready:
+            with self._batch_lock:
+                self._pending_files.update(not_ready)
+        
+        metrics.add_watch_folder_log('BATCH_COMPLETE', f"Success: {success_count}, Failed: {fail_count}, Not ready: {len(not_ready)}", "Complete")
+        logger.info(f"Watch Folder: batch complete - OK:{success_count}, Failed:{fail_count}, Not ready:{len(not_ready)}")
     
     def _import_dicom(self, content: bytes, filename: str) -> Optional[str]:
         """Import DICOM content to Orthanc. Returns patient name or None on failure."""
@@ -1869,9 +1939,10 @@ class WatchFolderManager(threading.Thread):
                     
                     current_time = time.time()
                     batch_interval = Config.WATCH_FOLDER_BATCH_INTERVAL
+                    pending_count = len(self._pending_files)
                     
-                    if (current_time - self._last_batch_time >= batch_interval and 
-                        self._pending_files):
+                    if (pending_count >= Config.WATCH_FOLDER_BATCH_SIZE or
+                        (current_time - self._last_batch_time >= batch_interval and pending_count > 0)):
                         self.process_batch()
                         self._last_batch_time = current_time
                     
@@ -2001,9 +2072,11 @@ class WatchFolderManager(threading.Thread):
             'db_size': len(self._processed_files),
             'interval': Config.WATCH_FOLDER_INTERVAL,
             'batch_interval': Config.WATCH_FOLDER_BATCH_INTERVAL,
+            'batch_size': Config.WATCH_FOLDER_BATCH_SIZE,
             'min_file_age': Config.WATCH_FOLDER_MIN_FILE_AGE,
             'max_depth': Config.WATCH_FOLDER_MAX_DEPTH,
             'extensions': list(set([e.lower() for e in self._get_extensions()])),
+            'parse_no_extension': Config.WATCH_FOLDER_PARSE_NO_EXTENSION,
             'cleanup_enabled': Config.WATCH_FOLDER_CLEANUP_ENABLED,
             'delete_originals': Config.WATCH_FOLDER_DELETE_ORIGINALS,
             'current_files_in_folder': files_count,
